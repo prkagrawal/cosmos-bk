@@ -1,0 +1,30 @@
+# Binaries for programs and plugins
+*.exe
+*.so
+*.dll
+
+# Test binary, built with `go test -c`
+*.test
+
+# Dependency directories (remove if using Go modules)
+vendor/
+
+# Go workspace file (if applicable)
+go.work
+
+# Go modules cache directory (if applicable)
+/go/pkg/mod/
+
+# Build cache
+/tmp/
+/build/
+
+# IDE specific files
+.idea/
+*.iml
+
+# OS generated files
+.DS_Store
+
+# Secrets
+*.env

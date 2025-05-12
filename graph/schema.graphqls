@@ -1,0 +1,351 @@
+# GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+# type Todo {
+#   id: ID!
+#   text: String!
+#   done: Boolean!
+#   user: User!
+# }
+
+# type User {
+#   id: ID!
+#   name: String!
+# }
+
+# input NewTodo {
+#   text: String!
+#   userId: String!
+# }
+
+scalar DateTime
+scalar Upload
+
+type Query {
+  # todos: [Todo!]!
+  # users: [User!]
+
+  # User queries
+  me: User!
+  user(id: ID!): User
+  users(skills: [String!], availability: AvailabilityFilter, role: UserRole): [User!]!
+  
+  # Nonprofit queries
+  nonprofit(id: ID!): Nonprofit
+  nonprofits(
+    causes: [String!], 
+    size: NonprofitSize, 
+    verifiedOnly: Boolean,
+    search: String
+  ): [Nonprofit!]!
+  
+  # Project queries
+  project(id: ID!): Project
+  projects(
+    status: ProjectStatus,
+    skillsNeeded: [String!],
+    timeCommitment: TimeCommitment,
+    urgency: UrgencyLevel,
+    nonprofitId: ID
+  ): [Project!]!
+  
+  # Matching queries
+  recommendedProjects(limit: Int = 10): [Project!]!
+  recommendedVolunteers(projectId: ID!, limit: Int = 5): [User!]!
+  
+  # Misc queries
+  skills: [Skill!]!
+  causes: [Cause!]!
+}
+
+type Mutation {
+  # createTodo(input: NewTodo!): Todo!
+
+  # Auth mutations
+  login(email: String!, password: String!): AuthPayload!
+  signup(input: SignupInput!): AuthPayload!
+  refreshToken(token: String!): AuthPayload!
+  
+  # User mutations
+  updateProfile(input: ProfileInput!): User!
+  addSkills(skills: [String!]!): User!
+  removeSkill(skill: String!): User!
+  setAvailability(input: AvailabilityInput!): User!
+  
+  # Nonprofit mutations
+  createNonprofit(input: NonprofitInput!): Nonprofit!
+  updateNonprofit(id: ID!, input: NonprofitInput!): Nonprofit!
+  verifyNonprofit(id: ID!): Nonprofit!
+  
+  # Project mutations
+  createProject(input: ProjectInput!): Project!
+  updateProject(id: ID!, input: ProjectInput!): Project!
+  changeProjectStatus(id: ID!, status: ProjectStatus!): Project!
+  applyToProject(projectId: ID!, message: String): Application!
+  acceptApplication(applicationId: ID!): Application!
+  rejectApplication(applicationId: ID!): Application!
+  
+  # Engagement mutations
+  startVolunteering(projectId: ID!): Engagement!
+  completeEngagement(engagementId: ID!, feedback: String): Engagement!
+  logHours(engagementId: ID!, hours: Float!, date: DateTime!, description: String): HoursLogged!
+}
+
+type Subscription {
+  projectUpdated(projectId: ID!): Project!
+  applicationReceived: Application!
+  engagementStarted: Engagement!
+}
+
+# Types
+type Availability {
+  hoursPerWeek: Int!
+  daysAvailable: [Weekday!]!
+  timezone: String!
+}
+
+type User {
+  id: ID!
+  email: String!
+  firstName: String!
+  lastName: String!
+  avatar: String
+  role: UserRole!
+  skills: [Skill!]!
+  availability: Availability
+  causes: [Cause!]!
+  bio: String
+  linkedIn: String
+  portfolio: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  applications: [Application!]!
+  engagements: [Engagement!]!
+  hoursLogged: [HoursLogged!]!
+}
+
+type Nonprofit {
+  id: ID!
+  name: String!
+  description: String!
+  logo: String
+  website: String!
+  ein: String!
+  verified: Boolean!
+  size: NonprofitSize!
+  causes: [Cause!]!
+  location: Location!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  projects: [Project!]!
+  members: [User!]!
+}
+
+type Project {
+  id: ID!
+  title: String!
+  description: String!
+  skillsNeeded: [Skill!]!
+  timeCommitment: TimeCommitment!
+  urgency: UrgencyLevel!
+  status: ProjectStatus!
+  startDate: DateTime
+  endDate: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  nonprofit: Nonprofit!
+  applications: [Application!]!
+  engagements: [Engagement!]!
+}
+
+type Application {
+  id: ID!
+  message: String
+  status: ApplicationStatus!
+  appliedAt: DateTime!
+  decidedAt: DateTime
+  
+  # Relationships
+  volunteer: User!
+  project: Project!
+}
+
+type Engagement {
+  id: ID!
+  startDate: DateTime!
+  endDate: DateTime
+  status: EngagementStatus!
+  feedback: String
+  feedbackSubmittedAt: DateTime
+  
+  # Relationships
+  volunteer: User!
+  project: Project!
+  hoursLogged: [HoursLogged!]!
+}
+
+type HoursLogged {
+  id: ID!
+  date: DateTime!
+  hours: Float!
+  description: String
+  approved: Boolean
+  approvedAt: DateTime
+  
+  # Relationships
+  engagement: Engagement!
+  approvedBy: User
+}
+
+type Skill {
+  id: ID!
+  name: String!
+  category: String!
+}
+
+type Cause {
+  id: ID!
+  name: String!
+  description: String!
+}
+
+type Location {
+  city: String!
+  state: String!
+  country: String!
+  remote: Boolean!
+}
+
+type AuthPayload {
+  token: String!
+  refreshToken: String!
+  user: User!
+}
+
+# Input Types
+input SignupInput {
+  email: String!
+  password: String!
+  firstName: String!
+  lastName: String!
+  role: UserRole!
+}
+
+input ProfileInput {
+  firstName: String
+  lastName: String
+  bio: String
+  linkedIn: String
+  portfolio: String
+  avatar: Upload
+  causes: [String!]
+}
+
+input AvailabilityInput {
+  hoursPerWeek: Int!
+  daysAvailable: [Weekday!]!
+  timezone: String!
+}
+
+input NonprofitInput {
+  name: String!
+  description: String!
+  website: String!
+  ein: String!
+  size: NonprofitSize!
+  causes: [String!]!
+  location: LocationInput!
+  logo: Upload
+}
+
+input LocationInput {
+  city: String!
+  state: String!
+  country: String!
+  remote: Boolean!
+}
+
+input ProjectInput {
+  nonprofitId: ID!
+  title: String!
+  description: String!
+  skillsNeeded: [String!]!
+  timeCommitment: TimeCommitment!
+  urgency: UrgencyLevel!
+  startDate: DateTime
+  endDate: DateTime
+}
+
+# Enums
+enum UserRole {
+  VOLUNTEER
+  NONPROFIT_ADMIN
+  PLATFORM_ADMIN
+}
+
+enum ProjectStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ApplicationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+enum EngagementStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum NonprofitSize {
+  SMALL
+  MEDIUM
+  LARGE
+  VERY_LARGE
+}
+
+enum TimeCommitment {
+  LESS_THAN_5_HOURS
+  FIVE_TO_TEN_HOURS
+  TEN_TO_TWENTY_HOURS
+  MORE_THAN_TWENTY_HOURS
+}
+
+enum UrgencyLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum Weekday {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+# Filter Inputs
+input AvailabilityFilter {
+  hoursPerWeekMin: Int
+  daysAvailable: [Weekday!]
+}
+
