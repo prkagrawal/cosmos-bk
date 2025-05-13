@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"io"
 	"time"
 
 	"gorm.io/gorm"
@@ -149,4 +150,10 @@ type Cause struct {
 	gorm.Model
 	Name        string `gorm:"uniqueIndex"`
 	Description string
+}
+
+// Upload represents a file upload in GraphQL.
+type Upload struct {
+	Filename string
+	File     io.Reader
 }

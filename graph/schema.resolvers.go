@@ -6,333 +6,1582 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/prkagrawal/cosmos-bk2/auth"
 	"github.com/prkagrawal/cosmos-bk2/graph/model"
+	"gorm.io/gorm"
 )
+
+// --- Helper Functions ---
+
+// idToUint converts a GraphQL ID (string) to a GORM ID (uint).
+func idToUint(idStr string) (uint, error) {
+	if idStr == "" {
+		return 0, errors.New("ID string cannot be empty")
+	}
+	idUint64, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid ID format '%s': %w", idStr, err)
+	}
+	return uint(idUint64), nil
+}
+
+// formatTime formats a time.Time object into an RFC3339 string.
+// GraphQL DateTime scalars are typically represented as ISO 8601 strings.
+func formatTime(t time.Time) string {
+	// Check if the time is the zero value for time.Time.
+	// GORM's default for `time.Time` not explicitly set can be "0001-01-01T00:00:00Z".
+	// Depending on schema (nullable or not), you might return "" or an error.
+	// For non-nullable DateTime, an actual date string is expected.
+	if t.IsZero() || t.Unix() < 0 { // Check for zero time or very old default time
+		// This case needs careful handling based on whether the GraphQL field is nullable
+		// and what a "zero" date means in your application.
+		// If the field is non-nullable in GraphQL, returning "" might lead to GQL errors.
+		// For now, let's assume zero time means it's not set, and if GraphQL expects a string,
+		// we should ideally not reach here for non-nullable fields with zero times.
+		// Or, if it's a valid "zero" representation, format it.
+		// Let's be strict: if it's a real date, format it. If zero, and GQL field is string, it's tricky.
+		// Assuming GORM populates these from DB, they should be valid or zero.
+		// Let's return empty string for zero time, and let GQL validation catch if it's an issue for non-nullable.
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+// formatNullableTime formats a *time.Time object into a *string (RFC3339).
+// If the time.Time pointer is nil or the time is zero, it returns nil.
+func formatNullableTime(t *time.Time) *string {
+	if t == nil || t.IsZero() || t.Unix() < 0 {
+		return nil
+	}
+	s := t.Format(time.RFC3339)
+	return &s
+}
+
+// parseDateTimeString converts an RFC3339 string to time.Time.
+func parseDateTimeString(dateTimeStr string) (time.Time, error) {
+	if dateTimeStr == "" {
+		return time.Time{}, errors.New("date string cannot be empty")
+	}
+	t, err := time.Parse(time.RFC3339, dateTimeStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid date format: %w", err)
+	}
+	return t, nil
+}
+
+// parseNullableDateTimeString converts an *string (RFC3339) to *time.Time.
+func parseNullableDateTimeString(dateTimeStr *string) (*time.Time, error) {
+	if dateTimeStr == nil || *dateTimeStr == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, *dateTimeStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date format: %w", err)
+	}
+	return &t, nil
+}
+
+// saveUpload saves an uploaded file and returns its URL or path.
+// This is a basic example saving to a local "uploads" directory.
+// For production, use a cloud storage service like S3.
+func saveUpload(upload *model.Upload, subDir string) (string, error) {
+	if upload == nil {
+		return "", nil // No upload provided
+	}
+
+	// Create a unique filename to prevent overwrites
+	ext := filepath.Ext(upload.Filename)
+	uniqueFilename := uuid.New().String() + ext
+
+	// Define the path to save. Ensure 'uploads' directory and 'subDir' exist.
+	uploadDirPath := filepath.Join("uploads", subDir)
+	if err := os.MkdirAll(uploadDirPath, os.ModePerm); err != nil {
+		return "", fmt.Errorf("failed to create upload directory: %w", err)
+	}
+	filePath := filepath.Join(uploadDirPath, uniqueFilename)
+
+	// Create the destination file
+	dst, err := os.Create(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dst.Close()
+
+	// Copy the uploaded file content to the destination file
+	if _, err := io.Copy(dst, upload.File); err != nil {
+		return "", fmt.Errorf("failed to copy uploaded file: %w", err)
+	}
+
+	// Return a URL or path. For local, it might be a relative path.
+	// For a web server, you'd return a URL like "/uploads/avatars/filename.jpg"
+	// This path needs to be configurable and accessible by your frontend/clients.
+	// Example: return "/" + filePath, // if "uploads" is served statically
+	return filePath, nil // Returning raw filepath for simplicity here
+}
+
+/****************************************************
+**********************RESOLVERS***********************
+*****************************************************/
 
 // ID is the resolver for the id field.
 func (r *applicationResolver) ID(ctx context.Context, obj *model.Application) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Application fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // AppliedAt is the resolver for the appliedAt field.
 func (r *applicationResolver) AppliedAt(ctx context.Context, obj *model.Application) (string, error) {
-	panic(fmt.Errorf("not implemented: AppliedAt - appliedAt"))
+	return formatTime(obj.AppliedAt), nil
 }
 
 // DecidedAt is the resolver for the decidedAt field.
 func (r *applicationResolver) DecidedAt(ctx context.Context, obj *model.Application) (*string, error) {
-	panic(fmt.Errorf("not implemented: DecidedAt - decidedAt"))
+	return formatNullableTime(obj.DecidedAt), nil
 }
 
-// HoursPerWeek is the resolver for the hoursPerWeek field.
+// HoursPerWeek converts int to int32 for GraphQL Int.
 func (r *availabilityResolver) HoursPerWeek(ctx context.Context, obj *model.Availability) (int32, error) {
-	panic(fmt.Errorf("not implemented: HoursPerWeek - hoursPerWeek"))
+	// Availability is embedded, obj is already populated by parent resolver
+	return int32(obj.HoursPerWeek), nil
 }
 
-// DaysAvailable is the resolver for the daysAvailable field.
+// DaysAvailable returns the slice directly.
 func (r *availabilityResolver) DaysAvailable(ctx context.Context, obj *model.Availability) ([]model.Weekday, error) {
-	panic(fmt.Errorf("not implemented: DaysAvailable - daysAvailable"))
+	// Availability is embedded, obj is already populated by parent resolver
+	return obj.DaysAvailable, nil
 }
 
 // ID is the resolver for the id field.
 func (r *causeResolver) ID(ctx context.Context, obj *model.Cause) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Cause fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // ID is the resolver for the id field.
 func (r *engagementResolver) ID(ctx context.Context, obj *model.Engagement) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Engagement fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // StartDate is the resolver for the startDate field.
 func (r *engagementResolver) StartDate(ctx context.Context, obj *model.Engagement) (string, error) {
-	panic(fmt.Errorf("not implemented: StartDate - startDate"))
+	return formatTime(obj.StartDate), nil
 }
 
 // EndDate is the resolver for the endDate field.
 func (r *engagementResolver) EndDate(ctx context.Context, obj *model.Engagement) (*string, error) {
-	panic(fmt.Errorf("not implemented: EndDate - endDate"))
+	return formatNullableTime(obj.EndDate), nil
 }
 
 // FeedbackSubmittedAt is the resolver for the feedbackSubmittedAt field.
 func (r *engagementResolver) FeedbackSubmittedAt(ctx context.Context, obj *model.Engagement) (*string, error) {
-	panic(fmt.Errorf("not implemented: FeedbackSubmittedAt - feedbackSubmittedAt"))
+	return formatNullableTime(obj.FeedbackSubmittedAt), nil
 }
 
 // ID is the resolver for the id field.
 func (r *hoursLoggedResolver) ID(ctx context.Context, obj *model.HoursLogged) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.User fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // Date is the resolver for the date field.
 func (r *hoursLoggedResolver) Date(ctx context.Context, obj *model.HoursLogged) (string, error) {
-	panic(fmt.Errorf("not implemented: Date - date"))
+	return formatTime(obj.Date), nil
 }
 
 // ApprovedAt is the resolver for the approvedAt field.
 func (r *hoursLoggedResolver) ApprovedAt(ctx context.Context, obj *model.HoursLogged) (*string, error) {
-	panic(fmt.Errorf("not implemented: ApprovedAt - approvedAt"))
+	return formatNullableTime(obj.ApprovedAt), nil
 }
 
 // Login is the resolver for the login field.
 func (r *mutationResolver) Login(ctx context.Context, email string, password string) (*model.AuthPayload, error) {
-	panic(fmt.Errorf("not implemented: Login - login"))
+	user, err := r.AuthService.Authenticate(ctx, email, password)
+	if err != nil {
+		// It's good practice to return a generic "invalid credentials" rather than "user not found" or "wrong password"
+		// to avoid user enumeration. auth.Authenticate already returns "invalid credentials".
+		return nil, errors.New("invalid email or password")
+	}
+
+	tokenString, err := auth.GenerateJWT(user)
+	if err != nil {
+		// Log internal server error
+		fmt.Printf("Error generating JWT: %v\n", err) // Replace with your logger
+		return nil, errors.New("could not generate token")
+	}
+
+	// TODO: Implement proper refresh token generation and storage
+	refreshTokenString := "dummy-refresh-token-" + fmt.Sprintf("%d", user.ID) // Placeholder
+
+	return &model.AuthPayload{
+		Token:        tokenString,
+		RefreshToken: refreshTokenString,
+		User:         user,
+	}, nil
 }
 
 // Signup is the resolver for the signup field.
 func (r *mutationResolver) Signup(ctx context.Context, input model.SignupInput) (*model.AuthPayload, error) {
-	panic(fmt.Errorf("not implemented: Signup - signup"))
+	// Access the AuthService from the receiver 'r'
+	newUser, err := r.AuthService.CreateUser(ctx, input)
+	if err != nil {
+		// Log the error
+		// logger.Error().Err(err).Msg("Signup failed during user creation")
+		// Consider returning more specific GraphQL errors later
+		return nil, fmt.Errorf("signup failed: %w", err)
+	}
+
+	// Generate JWT for the new user
+	tokenString, err := auth.GenerateJWT(newUser)
+	if err != nil {
+		// Log the error
+		// logger.Error().Err(err).Msg("Signup failed during token generation")
+		return nil, fmt.Errorf("could not generate token after signup: %w", err)
+	}
+
+	// TODO: Implement proper refresh token generation and storage
+	refreshTokenString := "dummy-refresh-token-" + fmt.Sprintf("%d", newUser.ID) // Placeholder
+
+	// Construct the response payload
+	authPayload := &model.AuthPayload{
+		Token:        tokenString,
+		RefreshToken: refreshTokenString,
+		User:         newUser, // newUser is already a *model.User
+	}
+
+	return authPayload, nil
 }
 
 // RefreshToken is the resolver for the refreshToken field.
 func (r *mutationResolver) RefreshToken(ctx context.Context, token string) (*model.AuthPayload, error) {
-	panic(fmt.Errorf("not implemented: RefreshToken - refreshToken"))
+	// TODO: Implement proper refresh token validation and re-issuance.
+	// This requires:
+	// 1. Verifying the refresh token (e.g., against a database of valid refresh tokens).
+	// 2. If valid, fetch the user associated with it.
+	// 3. Generate a new JWT (access token).
+	// 4. Optionally, generate a new refresh token (token rotation).
+	// For now, this is a placeholder.
+	if token == "" { // Basic check
+		return nil, errors.New("refresh token is required")
+	}
+	// Example: Try to parse it as if it were a JWT for user ID (highly insecure, just for demo structure)
+	// claims, err := auth.ValidateJWT(token) // You'd need a ValidateJWT for refresh tokens
+	// if err != nil {
+	//  return nil, errors.New("invalid refresh token")
+	// }
+	// userID := claims["sub"].(string)
+	// var user model.User
+	// if err := r.DB.First(&user, "id = ?", userID).Error; err != nil {
+	//  return nil, errors.New("user not found for refresh token")
+	// }
+	// newTokenString, _ := auth.GenerateJWT(&user)
+	// newRefreshTokenString := "new-dummy-refresh-token"
+	// return &model.AuthPayload{Token: newTokenString, RefreshToken: newRefreshTokenString, User: &user}, nil
+
+	panic(fmt.Errorf("not implemented: RefreshToken - proper refresh token logic required"))
 }
 
 // UpdateProfile is the resolver for the updateProfile field.
 func (r *mutationResolver) UpdateProfile(ctx context.Context, input model.ProfileInput) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: UpdateProfile - updateProfile"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	// Apply updates from input
+	if input.FirstName != nil {
+		currentUser.FirstName = *input.FirstName
+	}
+	if input.LastName != nil {
+		currentUser.LastName = *input.LastName
+	}
+	if input.Bio != nil {
+		currentUser.Bio = *input.Bio
+	}
+	if input.LinkedIn != nil {
+		currentUser.LinkedInURL = *input.LinkedIn
+	}
+	if input.Portfolio != nil {
+		currentUser.PortfolioURL = *input.Portfolio
+	}
+
+	// Handle avatar upload
+	if input.Avatar != nil {
+		// Save the uploaded file and get its URL/path
+		// The "avatars" subdirectory is an example.
+		avatar := &model.Upload{
+			Filename: input.Avatar.Filename,
+			File:     input.Avatar.File,
+		}
+		avatarURL, err := saveUpload(avatar, "avatars")
+		if err != nil {
+			// Log error: fmt.Printf("Failed to upload avatar: %v\n", err)
+			return nil, fmt.Errorf("failed to save avatar: %w", err)
+		}
+		currentUser.AvatarURL = avatarURL
+	}
+
+	// Handle causes (assuming input.Causes are names of causes)
+	if input.Causes != nil {
+		var causesToSet []*model.Cause
+		for _, causeName := range input.Causes {
+			var cause model.Cause
+			if err := r.DB.Where("name = ?", causeName).First(&cause).Error; err == nil {
+				causesToSet = append(causesToSet, &cause)
+			} else {
+				// Optionally create new causes or return an error if a cause doesn't exist
+				// For now, we'll ignore causes not found or you can return an error:
+				// return nil, fmt.Errorf("cause '%s' not found", causeName)
+			}
+		}
+		// GORM's Association `Replace` is good for many2many updates
+		if err := r.DB.Model(currentUser).Association("Causes").Replace(causesToSet); err != nil {
+			return nil, fmt.Errorf("failed to update user causes: %w", err)
+		}
+	}
+
+	if err := r.DB.Save(currentUser).Error; err != nil {
+		// Log error
+		return nil, fmt.Errorf("failed to update profile: %w", err)
+	}
+
+	return currentUser, nil
 }
 
 // AddSkills is the resolver for the addSkills field.
 func (r *mutationResolver) AddSkills(ctx context.Context, skills []string) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: AddSkills - addSkills"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	var skillsToAdd []*model.Skill
+	for _, skillName := range skills {
+		var skill model.Skill
+		// Find or create skill
+		if err := r.DB.Where("name = ?", skillName).FirstOrCreate(&skill, model.Skill{Name: skillName, Category: "Default" /* Or derive category */}).Error; err != nil {
+			return nil, fmt.Errorf("failed to find or create skill '%s': %w", skillName, err)
+		}
+		skillsToAdd = append(skillsToAdd, &skill)
+	}
+
+	// Append new skills to user's existing skills
+	if err := r.DB.Model(currentUser).Association("Skills").Append(skillsToAdd); err != nil {
+		return nil, fmt.Errorf("failed to add skills: %w", err)
+	}
+
+	// Reload user to get updated skills list in the response (GORM doesn't auto-populate after Append sometimes)
+	// Or manually append to currentUser.Skills if you don't want another DB hit.
+	// For consistency, let's refetch or ensure the association is loaded.
+	r.DB.Preload("Skills").Preload("Causes").First(currentUser, currentUser.ID)
+	return currentUser, nil
 }
 
 // RemoveSkill is the resolver for the removeSkill field.
-func (r *mutationResolver) RemoveSkill(ctx context.Context, skill string) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: RemoveSkill - removeSkill"))
+func (r *mutationResolver) RemoveSkill(ctx context.Context, skillName string) (*model.User, error) {
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	var skillToRemove model.Skill
+	if err := r.DB.Where("name = ?", skillName).First(&skillToRemove).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("skill '%s' not found", skillName)
+		}
+		return nil, fmt.Errorf("failed to find skill '%s': %w", skillName, err)
+	}
+
+	if err := r.DB.Model(currentUser).Association("Skills").Delete(&skillToRemove); err != nil {
+		return nil, fmt.Errorf("failed to remove skill: %w", err)
+	}
+	r.DB.Preload("Skills").Preload("Causes").First(currentUser, currentUser.ID)
+	return currentUser, nil
 }
 
 // SetAvailability is the resolver for the setAvailability field.
 func (r *mutationResolver) SetAvailability(ctx context.Context, input model.AvailabilityInput) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: SetAvailability - setAvailability"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	currentUser.Availability.HoursPerWeek = int(input.HoursPerWeek)              // Cast int32 to int
+	currentUser.Availability.DaysAvailable = model.Weekdays(input.DaysAvailable) // Cast []model.Weekday to model.Weekdays
+	currentUser.Availability.Timezone = input.Timezone
+
+	if err := r.DB.Save(currentUser).Error; err != nil {
+		return nil, fmt.Errorf("failed to set availability: %w", err)
+	}
+	// No need to reload, Availability is embedded
+	return currentUser, nil
 }
 
 // CreateNonprofit is the resolver for the createNonprofit field.
 func (r *mutationResolver) CreateNonprofit(ctx context.Context, input model.NonprofitInput) (*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: CreateNonprofit - createNonprofit"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+	// Authorization: Only certain roles (e.g., platform admin or verified user) might create nonprofits.
+	// For example:
+	// if currentUser.Role != model.PlatformAdmin { // Or some other role logic
+	//  return nil, errors.New("unauthorized: insufficient permissions to create nonprofit")
+	// }
+
+	// Handle logo upload
+	logoURL := ""
+	if input.Logo != nil {
+		var uploadErr error
+		// Convert *graphql.Upload to *model.Upload
+		convertedLogo := &model.Upload{
+			Filename: input.Logo.Filename,
+			File:     input.Logo.File,
+		}
+		logoURL, uploadErr = saveUpload(convertedLogo, "nonprofit_logos")
+		if uploadErr != nil {
+			return nil, fmt.Errorf("failed to save nonprofit logo: %w", uploadErr)
+		}
+	}
+
+	newNonprofit := model.Nonprofit{
+		Name:        input.Name,
+		Description: input.Description,
+		Website:     input.Website,
+		EIN:         input.Ein,
+		Size:        input.Size,
+		LogoURL:     logoURL,
+		Verified:    false, // Or based on policy, e.g., true if created by admin
+		Location: model.Location{
+			City:    input.Location.City,
+			State:   input.Location.State,
+			Country: input.Location.Country,
+			Remote:  input.Location.Remote,
+		},
+		// Members: This is tricky on creation. Typically, the creator becomes a member.
+		// You might want to add currentUser as a NonprofitAdmin member.
+	}
+
+	// Handle causes
+	var causesToSet []*model.Cause
+	for _, causeName := range input.Causes {
+		var cause model.Cause
+		if err := r.DB.Where("name = ?", causeName).FirstOrCreate(&cause, model.Cause{Name: causeName, Description: "" /* Or provide default */}).Error; err != nil {
+			return nil, fmt.Errorf("failed to find or create cause '%s': %w", causeName, err)
+		}
+		causesToSet = append(causesToSet, &cause)
+	}
+
+	// GORM transaction for atomicity
+	err = r.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&newNonprofit).Error; err != nil {
+			return fmt.Errorf("failed to create nonprofit: %w", err)
+		}
+		if len(causesToSet) > 0 {
+			if err := tx.Model(&newNonprofit).Association("Causes").Replace(causesToSet); err != nil {
+				return fmt.Errorf("failed to set nonprofit causes: %w", err)
+			}
+		}
+		// Add current user as a member (e.g., NonprofitAdmin)
+		// This assumes NonprofitMembers is a many2many relationship setup in GORM
+		// You might need a join table model if there are extra fields on the membership
+		if err := tx.Model(&newNonprofit).Association("Members").Append(currentUser); err != nil {
+			return fmt.Errorf("failed to add creator as nonprofit member: %w", err)
+		}
+		// TODO: Potentially assign a role to this member in the nonprofit_members join table if it exists
+		return nil
+	})
+
+	if err != nil {
+		return nil, err // Error already formatted
+	}
+
+	// Preload associations for the response
+	r.DB.Preload("Causes").Preload("Members").First(&newNonprofit, newNonprofit.ID)
+	return &newNonprofit, nil
 }
 
 // UpdateNonprofit is the resolver for the updateNonprofit field.
 func (r *mutationResolver) UpdateNonprofit(ctx context.Context, id string, input model.NonprofitInput) (*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: UpdateNonprofit - updateNonprofit"))
+	_, err := auth.GetUserFromContext(ctx) // Ensure authenticated
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	nonprofitID, err := idToUint(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var nonprofitToUpdate model.Nonprofit
+	if err := r.DB.Preload("Causes").First(&nonprofitToUpdate, nonprofitID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("nonprofit with ID %s not found", id)
+		}
+		return nil, fmt.Errorf("failed to fetch nonprofit: %w", err)
+	}
+
+	// Authorization: Check if currentUser is an admin of this nonprofit or platform admin
+	// Example: if !isNonprofitAdmin(currentUser, nonprofitToUpdate.ID) && currentUser.Role != model.PlatformAdmin {
+	//  return nil, errors.New("unauthorized to update this nonprofit")
+	// }
+
+	// Apply updates
+	nonprofitToUpdate.Name = input.Name
+	nonprofitToUpdate.Description = input.Description
+	nonprofitToUpdate.Website = input.Website
+	nonprofitToUpdate.EIN = input.Ein // Be careful with EIN updates if it's sensitive
+	nonprofitToUpdate.Size = input.Size
+	nonprofitToUpdate.Location = model.Location{
+		City: input.Location.City, State: input.Location.State, Country: input.Location.Country, Remote: input.Location.Remote,
+	}
+
+	if input.Logo != nil {
+		convertedLogo := &model.Upload{
+			Filename: input.Logo.Filename,
+			File:     input.Logo.File,
+		}
+		logoURL, uploadErr := saveUpload(convertedLogo, "nonprofit_logos")
+		if uploadErr != nil {
+			return nil, fmt.Errorf("failed to save nonprofit logo: %w", uploadErr)
+		}
+		nonprofitToUpdate.LogoURL = logoURL
+	}
+
+	// Handle causes update
+	if input.Causes != nil {
+		var causesToSet []*model.Cause
+		for _, causeName := range input.Causes {
+			var cause model.Cause
+			if err := r.DB.Where("name = ?", causeName).FirstOrCreate(&cause, model.Cause{Name: causeName}).Error; err != nil {
+				return nil, fmt.Errorf("failed to process cause '%s': %w", causeName, err)
+			}
+			causesToSet = append(causesToSet, &cause)
+		}
+		if err := r.DB.Model(&nonprofitToUpdate).Association("Causes").Replace(causesToSet); err != nil {
+			return nil, fmt.Errorf("failed to update nonprofit causes: %w", err)
+		}
+	}
+
+	if err := r.DB.Save(&nonprofitToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to update nonprofit: %w", err)
+	}
+
+	r.DB.Preload("Causes").Preload("Members").First(&nonprofitToUpdate, nonprofitToUpdate.ID) // Re-fetch with associations
+	return &nonprofitToUpdate, nil
 }
 
 // VerifyNonprofit is the resolver for the verifyNonprofit field.
 func (r *mutationResolver) VerifyNonprofit(ctx context.Context, id string) (*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: VerifyNonprofit - verifyNonprofit"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	// Authorization: Only PlatformAdmins can verify nonprofits
+	if currentUser.Role != model.PlatformAdmin {
+		return nil, errors.New("unauthorized: only platform admins can verify nonprofits")
+	}
+
+	nonprofitID, err := idToUint(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var nonprofitToVerify model.Nonprofit
+	if err := r.DB.First(&nonprofitToVerify, nonprofitID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("nonprofit with ID %s not found", id)
+		}
+		return nil, fmt.Errorf("failed to fetch nonprofit: %w", err)
+	}
+
+	nonprofitToVerify.Verified = true
+	if err := r.DB.Save(&nonprofitToVerify).Error; err != nil {
+		return nil, fmt.Errorf("failed to verify nonprofit: %w", err)
+	}
+
+	r.DB.Preload("Causes").Preload("Members").First(&nonprofitToVerify, nonprofitToVerify.ID)
+	return &nonprofitToVerify, nil
 }
 
 // CreateProject is the resolver for the createProject field.
 func (r *mutationResolver) CreateProject(ctx context.Context, input model.ProjectInput) (*model.Project, error) {
-	panic(fmt.Errorf("not implemented: CreateProject - createProject"))
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	nonprofitID, err := idToUint(input.NonprofitID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid nonprofit ID: %w", err)
+	}
+
+	// Authorization: Check if currentUser is an admin of the nonprofitID
+	// or a platform admin.
+	// This requires a helper function like `isNonprofitAdmin(user, nonprofitID)`
+	// For now, basic check:
+	var nonprofit model.Nonprofit
+	if err := r.DB.Select("id").First(&nonprofit, nonprofitID).Error; err != nil {
+		return nil, fmt.Errorf("nonprofit with ID %s not found", input.NonprofitID)
+	}
+	// Add more robust check if user is a member of this nonprofit with admin role.
+	isMember := false
+	if err := r.DB.Model(&nonprofit).Where("user_id = ?", currentUser.ID).Association("Members").Find(currentUser); err == nil { // This check needs refinement
+		// A proper check would involve querying the nonprofit_members join table
+		// and checking the role if roles are stored per membership.
+		// For simplicity, let's assume if they are in Members, they can create (placeholder logic)
+		// A better check:
+		var count int64
+		r.DB.Table("nonprofit_members").Where("nonprofit_id = ? AND user_id = ?", nonprofitID, currentUser.ID).Count(&count)
+		if count > 0 {
+			isMember = true // Further check role if applicable
+		}
+	}
+
+	if !isMember && currentUser.Role != model.PlatformAdmin && currentUser.Role != model.NonprofitAdmin { // Refine role check
+		return nil, errors.New("unauthorized: you must be an admin of the nonprofit or a platform admin to create projects")
+	}
+
+	startDate, err := parseNullableDateTimeString(input.StartDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start date: %w", err)
+	}
+	endDate, err := parseNullableDateTimeString(input.EndDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end date: %w", err)
+	}
+
+	newProject := model.Project{
+		NonprofitID:    nonprofitID,
+		Title:          input.Title,
+		Description:    input.Description,
+		TimeCommitment: input.TimeCommitment,
+		Urgency:        input.Urgency,
+		Status:         model.Draft, // Default status
+		StartDate:      startDate,
+		EndDate:        endDate,
+	}
+
+	// Handle skills needed
+	var skillsToSet []*model.Skill
+	for _, skillName := range input.SkillsNeeded {
+		var skill model.Skill
+		if err := r.DB.Where("name = ?", skillName).FirstOrCreate(&skill, model.Skill{Name: skillName, Category: "Default"}).Error; err != nil {
+			return nil, fmt.Errorf("failed to find or create skill '%s': %w", skillName, err)
+		}
+		skillsToSet = append(skillsToSet, &skill)
+	}
+
+	err = r.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&newProject).Error; err != nil {
+			return fmt.Errorf("failed to create project: %w", err)
+		}
+		if len(skillsToSet) > 0 {
+			if err := tx.Model(&newProject).Association("SkillsNeeded").Replace(skillsToSet); err != nil {
+				return fmt.Errorf("failed to set project skills: %w", err)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	r.DB.Preload("SkillsNeeded").Preload("Nonprofit").First(&newProject, newProject.ID)
+	return &newProject, nil
 }
 
 // UpdateProject is the resolver for the updateProject field.
 func (r *mutationResolver) UpdateProject(ctx context.Context, id string, input model.ProjectInput) (*model.Project, error) {
-	panic(fmt.Errorf("not implemented: UpdateProject - updateProject"))
+	_, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	projectID, err := idToUint(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var projectToUpdate model.Project
+	if err := r.DB.Preload("SkillsNeeded").First(&projectToUpdate, projectID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("project with ID %s not found", id)
+		}
+		return nil, fmt.Errorf("failed to fetch project: %w", err)
+	}
+
+	// Authorization: Check if currentUser is an admin of the project's nonprofit or platform admin.
+	// Similar logic to CreateProject authorization
+	// Example: if !isProjectAdmin(currentUser, projectToUpdate) ...
+
+	_, err = idToUint(input.NonprofitID) // Input has NonprofitID, should this be updatable?
+	if err != nil {
+		return nil, fmt.Errorf("invalid nonprofit ID in input: %w", err)
+	}
+	// Typically, you might not allow changing the nonprofit of a project.
+	// If allowed, ensure auth for the new nonprofit too.
+	// For this example, let's assume projectToUpdate.NonprofitID is the source of truth for auth.
+	// if projectToUpdate.NonprofitID != nonprofitID {
+	//  return nil, errors.New("changing the parent nonprofit of a project is not allowed or requires special permissions")
+	// }
+
+	// Apply updates
+	projectToUpdate.Title = input.Title
+	projectToUpdate.Description = input.Description
+	projectToUpdate.TimeCommitment = input.TimeCommitment
+	projectToUpdate.Urgency = input.Urgency
+	// projectToUpdate.NonprofitID = nonprofitID; // If you allow changing this
+
+	startDate, err := parseNullableDateTimeString(input.StartDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start date: %w", err)
+	}
+	endDate, err := parseNullableDateTimeString(input.EndDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end date: %w", err)
+	}
+	projectToUpdate.StartDate = startDate
+	projectToUpdate.EndDate = endDate
+
+	// Handle skills needed update
+	if input.SkillsNeeded != nil {
+		var skillsToSet []*model.Skill
+		for _, skillName := range input.SkillsNeeded {
+			var skill model.Skill
+			if err := r.DB.Where("name = ?", skillName).FirstOrCreate(&skill, model.Skill{Name: skillName}).Error; err != nil {
+				return nil, fmt.Errorf("failed to process skill '%s': %w", skillName, err)
+			}
+			skillsToSet = append(skillsToSet, &skill)
+		}
+		if err := r.DB.Model(&projectToUpdate).Association("SkillsNeeded").Replace(skillsToSet); err != nil {
+			return nil, fmt.Errorf("failed to update project skills: %w", err)
+		}
+	}
+
+	if err := r.DB.Save(&projectToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to update project: %w", err)
+	}
+
+	r.DB.Preload("SkillsNeeded").Preload("Nonprofit").First(&projectToUpdate, projectToUpdate.ID)
+	return &projectToUpdate, nil
 }
 
 // ChangeProjectStatus is the resolver for the changeProjectStatus field.
 func (r *mutationResolver) ChangeProjectStatus(ctx context.Context, id string, status model.ProjectStatus) (*model.Project, error) {
-	panic(fmt.Errorf("not implemented: ChangeProjectStatus - changeProjectStatus"))
+	_, err := auth.GetUserFromContext(ctx) // Auth check
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+	// TODO: Add authorization logic (e.g., only project admin or platform admin)
+
+	projectID, err := idToUint(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var projectToUpdate model.Project
+	if err := r.DB.First(&projectToUpdate, projectID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("project with ID %s not found", id)
+		}
+		return nil, fmt.Errorf("failed to fetch project: %w", err)
+	}
+
+	// TODO: Validate status transition (e.g., can't go from COMPLETED to DRAFT)
+	projectToUpdate.Status = status
+	if err := r.DB.Save(&projectToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to change project status: %w", err)
+	}
+
+	r.DB.Preload("SkillsNeeded").Preload("Nonprofit").First(&projectToUpdate, projectToUpdate.ID)
+	return &projectToUpdate, nil
 }
 
 // ApplyToProject is the resolver for the applyToProject field.
-func (r *mutationResolver) ApplyToProject(ctx context.Context, projectID string, message *string) (*model.Application, error) {
-	panic(fmt.Errorf("not implemented: ApplyToProject - applyToProject"))
+func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr string, message *string) (*model.Application, error) {
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+	if currentUser.Role != model.Volunteer {
+		return nil, errors.New("only volunteers can apply to projects")
+	}
+
+	projectID, err := idToUint(projectIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if project exists and is active
+	var project model.Project
+	if err := r.DB.Where("status = ?", model.Active).First(&project, projectID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("active project with ID %s not found or not accepting applications", projectIDStr)
+		}
+		return nil, fmt.Errorf("failed to fetch project: %w", err)
+	}
+
+	// Check if user has already applied
+	var existingApplication model.Application
+	err = r.DB.Where("volunteer_id = ? AND project_id = ?", currentUser.ID, projectID).First(&existingApplication).Error
+	if err == nil { // Found an existing application
+		return nil, errors.New("you have already applied to this project")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) { // Some other DB error
+		return nil, fmt.Errorf("error checking existing application: %w", err)
+	}
+
+	newApplication := model.Application{
+		VolunteerID: currentUser.ID,
+		ProjectID:   projectID,
+		Message:     message,
+		Status:      model.Pending,
+		AppliedAt:   time.Now(),
+	}
+
+	if err := r.DB.Create(&newApplication).Error; err != nil {
+		return nil, fmt.Errorf("failed to create application: %w", err)
+	}
+
+	r.DB.Preload("Volunteer").Preload("Project").First(&newApplication, newApplication.ID)
+	return &newApplication, nil
 }
 
 // AcceptApplication is the resolver for the acceptApplication field.
-func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationID string) (*model.Application, error) {
-	panic(fmt.Errorf("not implemented: AcceptApplication - acceptApplication"))
+func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationIDStr string) (*model.Application, error) {
+	_, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	applicationID, err := idToUint(applicationIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var applicationToUpdate model.Application
+	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("application with ID %s not found", applicationIDStr)
+		}
+		return nil, fmt.Errorf("failed to fetch application: %w", err)
+	}
+
+	// Authorization: CurrentUser must be an admin of applicationToUpdate.Project.NonprofitID
+	// or platform admin. Add this check.
+	// Example: if !isNonprofitAdminOfProject(currentUser, applicationToUpdate.ProjectID) ...
+
+	if applicationToUpdate.Status != model.Pending {
+		return nil, fmt.Errorf("application is not pending (current status: %s)", applicationToUpdate.Status)
+	}
+
+	applicationToUpdate.Status = model.Accepted
+	now := time.Now()
+	applicationToUpdate.DecidedAt = &now
+
+	if err := r.DB.Save(&applicationToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to accept application: %w", err)
+	}
+
+	// TODO: Potentially create an Engagement record here if business logic dictates.
+	// Or trigger a notification.
+
+	r.DB.Preload("Volunteer").Preload("Project").First(&applicationToUpdate, applicationToUpdate.ID)
+	return &applicationToUpdate, nil
 }
 
 // RejectApplication is the resolver for the rejectApplication field.
-func (r *mutationResolver) RejectApplication(ctx context.Context, applicationID string) (*model.Application, error) {
-	panic(fmt.Errorf("not implemented: RejectApplication - rejectApplication"))
+func (r *mutationResolver) RejectApplication(ctx context.Context, applicationIDStr string) (*model.Application, error) {
+	// Similar logic to AcceptApplication for auth and fetching
+	_, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	applicationID, err := idToUint(applicationIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var applicationToUpdate model.Application
+	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationID).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch application: %w", err)
+	}
+
+	// Authorization check here...
+
+	if applicationToUpdate.Status != model.Pending {
+		return nil, fmt.Errorf("application is not pending (current status: %s)", applicationToUpdate.Status)
+	}
+
+	applicationToUpdate.Status = model.Rejected
+	now := time.Now()
+	applicationToUpdate.DecidedAt = &now
+
+	if err := r.DB.Save(&applicationToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to reject application: %w", err)
+	}
+	r.DB.Preload("Volunteer").Preload("Project").First(&applicationToUpdate, applicationToUpdate.ID)
+	return &applicationToUpdate, nil
 }
 
 // StartVolunteering is the resolver for the startVolunteering field.
-func (r *mutationResolver) StartVolunteering(ctx context.Context, projectID string) (*model.Engagement, error) {
-	panic(fmt.Errorf("not implemented: StartVolunteering - startVolunteering"))
+func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr string) (*model.Engagement, error) {
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	projectID, err := idToUint(projectIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	// This mutation implies an accepted application exists for the current user and project.
+	// Or, it could be initiated by a nonprofit admin for a volunteer.
+	// Let's assume it's for a volunteer who has an accepted application.
+
+	var acceptedApplication model.Application
+	err = r.DB.Where("volunteer_id = ? AND project_id = ? AND status = ?",
+		currentUser.ID, projectID, model.Accepted).First(&acceptedApplication).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("no accepted application found for you on this project, or you are not the volunteer")
+		}
+		return nil, fmt.Errorf("failed to find accepted application: %w", err)
+	}
+
+	// Check if an engagement already exists for this application/project/volunteer
+	var existingEngagement model.Engagement
+	err = r.DB.Where("volunteer_id = ? AND project_id = ?", currentUser.ID, projectID).First(&existingEngagement).Error
+	if err == nil { // Engagement already exists
+		return nil, errors.New("an engagement for this project and volunteer already exists")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("error checking existing engagement: %w", err)
+	}
+
+	newEngagement := model.Engagement{
+		VolunteerID: currentUser.ID, // Or from application.VolunteerID
+		ProjectID:   projectID,      // Or from application.ProjectID
+		StartDate:   time.Now(),
+		Status:      model.EngagementActive,
+	}
+
+	if err := r.DB.Create(&newEngagement).Error; err != nil {
+		return nil, fmt.Errorf("failed to start engagement: %w", err)
+	}
+
+	// Optionally, update project status to IN_PROGRESS if not already
+	r.DB.Model(&model.Project{}).Where("id = ?", projectID).Update("status", model.InProgress)
+
+	r.DB.Preload("Volunteer").Preload("Project").First(&newEngagement, newEngagement.ID)
+	return &newEngagement, nil
 }
 
 // CompleteEngagement is the resolver for the completeEngagement field.
-func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementID string, feedback *string) (*model.Engagement, error) {
-	panic(fmt.Errorf("not implemented: CompleteEngagement - completeEngagement"))
+func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementIDStr string, feedback *string) (*model.Engagement, error) {
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	engagementID, err := idToUint(engagementIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var engagementToUpdate model.Engagement
+	if err := r.DB.First(&engagementToUpdate, engagementID).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch engagement: %w", err)
+	}
+
+	// Authorization: Only the volunteer or nonprofit admin related to this engagement can complete it.
+	if engagementToUpdate.VolunteerID != currentUser.ID /* && !isNonprofitAdminOfProject(currentUser, engagementToUpdate.ProjectID) */ {
+		return nil, errors.New("unauthorized to complete this engagement")
+	}
+
+	if engagementToUpdate.Status != model.EngagementActive {
+		return nil, fmt.Errorf("engagement is not active (current status: %s)", engagementToUpdate.Status)
+	}
+
+	engagementToUpdate.Status = model.EngagementCompleted
+	now := time.Now()
+	engagementToUpdate.EndDate = &now
+	if feedback != nil {
+		engagementToUpdate.Feedback = feedback
+		engagementToUpdate.FeedbackSubmittedAt = &now
+	}
+
+	if err := r.DB.Save(&engagementToUpdate).Error; err != nil {
+		return nil, fmt.Errorf("failed to complete engagement: %w", err)
+	}
+
+	// Optionally, if all engagements for a project are complete, update project status.
+
+	r.DB.Preload("Volunteer").Preload("Project").First(&engagementToUpdate, engagementToUpdate.ID)
+	return &engagementToUpdate, nil
 }
 
 // LogHours is the resolver for the logHours field.
-func (r *mutationResolver) LogHours(ctx context.Context, engagementID string, hours float64, date string, description *string) (*model.HoursLogged, error) {
-	panic(fmt.Errorf("not implemented: LogHours - logHours"))
+func (r *mutationResolver) LogHours(ctx context.Context, engagementIDStr string, hours float64, dateStr string, description *string) (*model.HoursLogged, error) {
+	currentUser, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		return nil, errors.New("unauthenticated: " + err.Error())
+	}
+
+	engagementID, err := idToUint(engagementIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var engagement model.Engagement
+	if err := r.DB.Where("id = ? AND volunteer_id = ?", engagementID, currentUser.ID).First(&engagement).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("active engagement not found for you, or you are not the volunteer")
+		}
+		return nil, fmt.Errorf("failed to fetch engagement: %w", err)
+	}
+
+	if engagement.Status != model.EngagementActive {
+		return nil, errors.New("cannot log hours for an engagement that is not active")
+	}
+
+	date, err := parseDateTimeString(dateStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date for hours logged: %w", err)
+	}
+
+	newHoursLogged := model.HoursLogged{
+		EngagementID: engagementID,
+		Date:         date,
+		Hours:        hours,
+		Description:  description,
+		// Approved defaults to null/false depending on DB. Approval is a separate step.
+	}
+
+	if err := r.DB.Create(&newHoursLogged).Error; err != nil {
+		return nil, fmt.Errorf("failed to log hours: %w", err)
+	}
+
+	r.DB.Preload("Engagement").Preload("ApprovedBy").First(&newHoursLogged, newHoursLogged.ID)
+	return &newHoursLogged, nil
 }
+
+// --------------------------------------
+// --- NonProfit Field Resolvers ---
+// --------------------------------------
 
 // ID is the resolver for the id field.
 func (r *nonprofitResolver) ID(ctx context.Context, obj *model.Nonprofit) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Nonprofit fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // Logo is the resolver for the logo field.
 func (r *nonprofitResolver) Logo(ctx context.Context, obj *model.Nonprofit) (*string, error) {
-	panic(fmt.Errorf("not implemented: Logo - logo"))
+	if obj.LogoURL == "" {
+		return nil, nil
+	}
+	// This assumes LogoURL is a relative path or full URL.
+	// If it's a relative path, you might need to prefix it with your domain.
+	// e.g., return "https://yourdomain.com/" + obj.LogoURL, nil
+	return &obj.LogoURL, nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *nonprofitResolver) CreatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
-	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+	return formatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *nonprofitResolver) UpdatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
-	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+	return formatTime(obj.UpdatedAt), nil
 }
+
+// --------------------------------------
+// --- Project Field Resolvers ---
+// --------------------------------------
 
 // ID is the resolver for the id field.
 func (r *projectResolver) ID(ctx context.Context, obj *model.Project) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Project fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // StartDate is the resolver for the startDate field.
 func (r *projectResolver) StartDate(ctx context.Context, obj *model.Project) (*string, error) {
-	panic(fmt.Errorf("not implemented: StartDate - startDate"))
+	return formatNullableTime(obj.StartDate), nil
 }
 
 // EndDate is the resolver for the endDate field.
 func (r *projectResolver) EndDate(ctx context.Context, obj *model.Project) (*string, error) {
-	panic(fmt.Errorf("not implemented: EndDate - endDate"))
+	return formatNullableTime(obj.EndDate), nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *projectResolver) CreatedAt(ctx context.Context, obj *model.Project) (string, error) {
-	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+	return formatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *projectResolver) UpdatedAt(ctx context.Context, obj *model.Project) (string, error) {
-	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+	return formatTime(obj.UpdatedAt), nil
 }
 
 // Nonprofit is the resolver for the nonprofit field.
 func (r *projectResolver) Nonprofit(ctx context.Context, obj *model.Project) (*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: Nonprofit - nonprofit"))
+	// obj is the *model.Project fetched by the parent resolver.
+	// We need to fetch the associated Nonprofit using the NonprofitID.
+
+	// Option 1: If GORM preloaded it (efficient if fetching many projects)
+	// If the parent resolver did something like r.DB.Preload("Nonprofit").Find(&projects),
+	// then obj.Nonprofit might already be populated. However, relying on this implicitly
+	// can be fragile. Let's fetch explicitly for clarity.
+
+	// Option 2: Fetch explicitly (guaranteed to work)
+	var nonprofit model.Nonprofit
+	// obj.NonprofitID holds the foreign key
+	if err := r.DB.First(&nonprofit, obj.NonprofitID).Error; err != nil {
+		// Handle errors, e.g., nonprofit not found
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("nonprofit with ID %d not found for project %d", obj.NonprofitID, obj.ID)
+		}
+		// Log other errors
+		return nil, fmt.Errorf("failed to fetch nonprofit for project: %w", err)
+	}
+	return &nonprofit, nil // Return pointer
 }
+
+// ----------------------------
+// --- Query Resolvers ---
+// ----------------------------
 
 // Me is the resolver for the me field.
 func (r *queryResolver) Me(ctx context.Context) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: Me - me"))
+	user, err := auth.GetUserFromContext(ctx)
+	if err != nil {
+		// This error means not authenticated or user not found from token.
+		// GraphQL should typically return null for the field and an error in the "errors" array.
+		return nil, errors.New("unauthenticated: " + err.Error()) // Or a more generic "Access denied"
+	}
+	// Preload associations that are commonly requested with 'me'
+	err = r.DB.Preload("Skills").Preload("Causes").Preload("Applications").Preload("Engagements").First(user, user.ID).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to fully load authenticated user: %w", err)
+	}
+	return user, nil
 }
 
 // User is the resolver for the user field.
-func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error) {
-	panic(fmt.Errorf("not implemented: User - user"))
+func (r *queryResolver) User(ctx context.Context, idStr string) (*model.User, error) {
+	userID, err := idToUint(idStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var user model.User
+	// Preload common associations
+	if err := r.DB.Preload("Skills").Preload("Causes").Preload("Availability").First(&user, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // GraphQL convention: return null if not found, no error in errors array unless it's unexpected
+		}
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
+	}
+	return &user, nil
 }
 
 // Users is the resolver for the users field.
 func (r *queryResolver) Users(ctx context.Context, skills []string, availability *model.AvailabilityFilter, role *model.UserRole) ([]*model.User, error) {
-	panic(fmt.Errorf("not implemented: Users - users"))
+	query := r.DB.Model(&model.User{}).Preload("Skills").Preload("Causes").Preload("Availability")
+
+	if role != nil {
+		query = query.Where("role = ?", *role)
+	}
+
+	if len(skills) > 0 {
+		// This requires a join with user_skills and then skills table
+		// SELECT users.* FROM users
+		// JOIN user_skills ON user_skills.user_id = users.id
+		// JOIN skills ON skills.id = user_skills.skill_id
+		// WHERE skills.name IN (...)
+		// GROUP BY users.id
+		// HAVING COUNT(DISTINCT skills.name) = len(skills) // if all skills must match
+
+		// Simpler: any of the skills match
+		query = query.Joins("JOIN user_skills ON user_skills.user_id = users.id").
+			Joins("JOIN skills ON skills.id = user_skills.skill_id").
+			Where("skills.name IN ?", skills).Group("users.id")
+	}
+
+	if availability != nil {
+		if availability.HoursPerWeekMin != nil {
+			// Assuming Availability is embedded: users.hours_per_week
+			query = query.Where("hours_per_week >= ?", *availability.HoursPerWeekMin)
+		}
+		if len(availability.DaysAvailable) > 0 {
+			// This is tricky with JSONB. GORM might not directly support `?|` (jsonb_exists_any) easily.
+			// You might need raw SQL or a more complex GORM query.
+			// Example (PostgreSQL specific):
+			// "days_available @> ?" for checking if JSON array contains all elements of another JSON array.
+			// For "any of these days", it's more complex.
+			// Let's simplify: if any day matches, and assume days_available is a string array in JSON.
+			// This is a placeholder and likely needs refinement for JSONB array querying.
+			// One way: query.Where("JSON_CONTAINS(days_available, ?)", day) for each day in a loop (inefficient)
+			// Or construct a proper JSONB query:
+			// daysJSON, _ := json.Marshal(availability.DaysAvailable)
+			// query = query.Where("days_available::jsonb ??| array[?]", pq.Array(availability.DaysAvailable))
+			// For now, this part is complex and skipped for brevity.
+			// fmt.Println("Availability.DaysAvailable filter not fully implemented for JSONB yet.")
+		}
+	}
+
+	var users []*model.User
+	if err := query.Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch users: %w", err)
+	}
+	return users, nil
 }
 
 // Nonprofit is the resolver for the nonprofit field.
-func (r *queryResolver) Nonprofit(ctx context.Context, id string) (*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: Nonprofit - nonprofit"))
+func (r *queryResolver) Nonprofit(ctx context.Context, idStr string) (*model.Nonprofit, error) {
+	nonprofitID, err := idToUint(idStr)
+	if err != nil {
+		return nil, err
+	}
+	var nonprofit model.Nonprofit
+	if err := r.DB.Preload("Causes").Preload("Members").Preload("Projects").First(&nonprofit, nonprofitID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // Not found is null, not an error
+		}
+		return nil, fmt.Errorf("failed to fetch nonprofit: %w", err)
+	}
+	return &nonprofit, nil
 }
 
 // Nonprofits is the resolver for the nonprofits field.
 func (r *queryResolver) Nonprofits(ctx context.Context, causes []string, size *model.NonprofitSize, verifiedOnly *bool, search *string) ([]*model.Nonprofit, error) {
-	panic(fmt.Errorf("not implemented: Nonprofits - nonprofits"))
+	query := r.DB.Model(&model.Nonprofit{}).Preload("Causes").Preload("Members") // Don't preload Projects by default to avoid overfetching
+
+	if len(causes) > 0 {
+		query = query.Joins("JOIN nonprofit_causes ON nonprofit_causes.nonprofit_id = nonprofits.id").
+			Joins("JOIN causes ON causes.id = nonprofit_causes.cause_id").
+			Where("causes.name IN ?", causes).Group("nonprofits.id")
+	}
+	if size != nil {
+		query = query.Where("size = ?", *size)
+	}
+	if verifiedOnly != nil && *verifiedOnly {
+		query = query.Where("verified = ?", true)
+	}
+	if search != nil && *search != "" {
+		searchTerm := "%" + *search + "%"
+		query = query.Where("name ILIKE ? OR description ILIKE ?", searchTerm, searchTerm)
+	}
+
+	var nonprofits []*model.Nonprofit
+	if err := query.Find(&nonprofits).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch nonprofits: %w", err)
+	}
+	return nonprofits, nil
 }
 
 // Project is the resolver for the project field.
-func (r *queryResolver) Project(ctx context.Context, id string) (*model.Project, error) {
-	panic(fmt.Errorf("not implemented: Project - project"))
+func (r *queryResolver) Project(ctx context.Context, idStr string) (*model.Project, error) {
+	projectID, err := idToUint(idStr)
+	if err != nil {
+		return nil, err
+	}
+	var project model.Project
+	if err := r.DB.Preload("SkillsNeeded").Preload("Nonprofit").Preload("Applications").Preload("Engagements").First(&project, projectID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // Not found
+		}
+		return nil, fmt.Errorf("failed to fetch project: %w", err)
+	}
+	return &project, nil
 }
 
 // Projects is the resolver for the projects field.
-func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitID *string) ([]*model.Project, error) {
-	panic(fmt.Errorf("not implemented: Projects - projects"))
+func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitIDStr *string) ([]*model.Project, error) {
+	query := r.DB.Model(&model.Project{}).Preload("SkillsNeeded").Preload("Nonprofit")
+
+	if status != nil {
+		query = query.Where("status = ?", *status)
+	}
+	if len(skillsNeeded) > 0 {
+		query = query.Joins("JOIN project_skills ON project_skills.project_id = projects.id").
+			Joins("JOIN skills ON skills.id = project_skills.skill_id").
+			Where("skills.name IN ?", skillsNeeded).Group("projects.id")
+	}
+	if timeCommitment != nil {
+		query = query.Where("time_commitment = ?", *timeCommitment)
+	}
+	if urgency != nil {
+		query = query.Where("urgency = ?", *urgency)
+	}
+	if nonprofitIDStr != nil && *nonprofitIDStr != "" {
+		nonprofitID, err := idToUint(*nonprofitIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid nonprofit ID for filtering: %w", err)
+		}
+		query = query.Where("nonprofit_id = ?", nonprofitID)
+	}
+
+	var projects []*model.Project
+	if err := query.Order("created_at DESC").Find(&projects).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch projects: %w", err)
+	}
+	return projects, nil
 }
 
 // RecommendedProjects is the resolver for the recommendedProjects field.
 func (r *queryResolver) RecommendedProjects(ctx context.Context, limit *int32) ([]*model.Project, error) {
-	panic(fmt.Errorf("not implemented: RecommendedProjects - recommendedProjects"))
+	// Basic recommendation: active projects, newest first.
+	// True recommendations would involve user skills, causes, past activity, etc.
+	query := r.DB.Model(&model.Project{}).
+		Where("status = ?", model.Active). // Only active projects
+		Order("created_at DESC").          // Newest first, simple heuristic
+		Preload("SkillsNeeded").Preload("Nonprofit")
+
+	l := 10 // Default limit
+	if limit != nil && *limit > 0 {
+		l = int(*limit)
+	}
+	query = query.Limit(l)
+
+	var projects []*model.Project
+	if err := query.Find(&projects).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch recommended projects: %w", err)
+	}
+	return projects, nil
 }
 
 // RecommendedVolunteers is the resolver for the recommendedVolunteers field.
-func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectID string, limit *int32) ([]*model.User, error) {
-	panic(fmt.Errorf("not implemented: RecommendedVolunteers - recommendedVolunteers"))
+func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectIDStr string, limit *int32) ([]*model.User, error) {
+	// Basic recommendation: volunteers whose skills match project's skillsNeeded.
+	// More advanced: availability, causes, past project types.
+	projectID, err := idToUint(projectIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var project model.Project
+	if err := r.DB.Preload("SkillsNeeded").First(&project, projectID).Error; err != nil {
+		return nil, fmt.Errorf("project not found for recommendations: %w", err)
+	}
+
+	if len(project.SkillsNeeded) == 0 {
+		return []*model.User{}, nil // No skills needed, no specific recommendations based on skills
+	}
+
+	var skillNames []string
+	for _, skill := range project.SkillsNeeded {
+		skillNames = append(skillNames, skill.Name)
+	}
+
+	query := r.DB.Model(&model.User{}).
+		Joins("JOIN user_skills ON user_skills.user_id = users.id").
+		Joins("JOIN skills ON skills.id = user_skills.skill_id").
+		Where("skills.name IN ?", skillNames).
+		Where("users.role = ?", model.Volunteer). // Only volunteers
+		Group("users.id").
+		// Order by number of matching skills (more complex) or just find users with any match.
+		// For now, any match is fine.
+		Preload("Skills").Preload("Causes").Preload("Availability")
+
+	l := 5 // Default limit
+	if limit != nil && *limit > 0 {
+		l = int(*limit)
+	}
+	query = query.Limit(l)
+
+	var users []*model.User
+	if err := query.Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch recommended volunteers: %w", err)
+	}
+	return users, nil
 }
 
 // Skills is the resolver for the skills field.
 func (r *queryResolver) Skills(ctx context.Context) ([]*model.Skill, error) {
-	panic(fmt.Errorf("not implemented: Skills - skills"))
+	var skills []*model.Skill // Use slice of pointers as gqlgen expects
+
+	// Access the DB from the receiver 'r' (which points to the main Resolver)
+	if err := r.DB.Find(&skills).Error; err != nil {
+		// Log the error appropriately (using your logger is good practice)
+		// logger.Error().Err(err).Msg("Failed to fetch skills")
+		return nil, fmt.Errorf("failed to fetch skills: %w", err)
+	}
+
+	return skills, nil
 }
 
 // Causes is the resolver for the causes field.
 func (r *queryResolver) Causes(ctx context.Context) ([]*model.Cause, error) {
-	panic(fmt.Errorf("not implemented: Causes - causes"))
+	var causes []*model.Cause
+	if err := r.DB.Order("name ASC").Find(&causes).Error; err != nil {
+		return nil, fmt.Errorf("failed to fetch causes: %w", err)
+	}
+	return causes, nil
 }
+
+// ------------------------------
+// --- Skill Field Resolver ---
+// ------------------------------
 
 // ID is the resolver for the id field.
 func (r *skillResolver) ID(ctx context.Context, obj *model.Skill) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.Skill fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
+// ------------------------------
+// --- Subscription Resolvers ---
+// ------------------------------
+
+// ------------------- TODO ------------------
+// Note: Proper subscription implementation requires a PubSub system (e.g., Redis, NATS, or in-memory for simple cases)
+// and integration with gqlgen's subscription capabilities.
+// The following are placeholders.
+
 // ProjectUpdated is the resolver for the projectUpdated field.
-func (r *subscriptionResolver) ProjectUpdated(ctx context.Context, projectID string) (<-chan *model.Project, error) {
-	panic(fmt.Errorf("not implemented: ProjectUpdated - projectUpdated"))
+func (r *subscriptionResolver) ProjectUpdated(ctx context.Context, projectIDStr string) (<-chan *model.Project, error) {
+	// 1. Validate projectIDStr
+	// 2. Create a channel for this specific subscription.
+	// 3. In your mutation resolvers (e.g., UpdateProject, ChangeProjectStatus),
+	//    after a project is updated, you would publish an event to the PubSub system.
+	// 4. This subscription resolver (or a service it calls) would listen to those PubSub events
+	//    for the given projectID and send the updated Project data to the channel.
+	// 5. Handle channel closure and context cancellation.
+	// Example (very simplified in-memory, not for production):
+	// ch := make(chan *model.Project)
+	// go func() {
+	//  defer close(ch)
+	//  // Periodically check or listen to some in-memory event bus
+	//  // For example, every 5 seconds, fetch the project and send if changed (bad idea)
+	//  // A real implementation uses a proper event-driven PubSub
+	// }()
+	// return ch, nil
+	panic(fmt.Errorf("not implemented: ProjectUpdated - requires PubSub system"))
 }
 
 // ApplicationReceived is the resolver for the applicationReceived field.
 func (r *subscriptionResolver) ApplicationReceived(ctx context.Context) (<-chan *model.Application, error) {
-	panic(fmt.Errorf("not implemented: ApplicationReceived - applicationReceived"))
+	// Similar to ProjectUpdated:
+	// - Mutations like ApplyToProject would publish an "application received" event.
+	// - This resolver would subscribe to such events (perhaps filtered by nonprofit admin, etc.).
+	panic(fmt.Errorf("not implemented: ApplicationReceived - requires PubSub system"))
 }
 
 // EngagementStarted is the resolver for the engagementStarted field.
 func (r *subscriptionResolver) EngagementStarted(ctx context.Context) (<-chan *model.Engagement, error) {
-	panic(fmt.Errorf("not implemented: EngagementStarted - engagementStarted"))
+	// Similar to ProjectUpdated:
+	// - Mutation StartVolunteering would publish an "engagement started" event.
+	panic(fmt.Errorf("not implemented: EngagementStarted - requires PubSub system"))
 }
+
+// -----------------------------------
+// --- User Field Resolvers ---
+// -----------------------------------
 
 // ID is the resolver for the id field.
 func (r *userResolver) ID(ctx context.Context, obj *model.User) (string, error) {
-	panic(fmt.Errorf("not implemented: ID - id"))
+	// obj is the *model.User fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
 // Avatar is the resolver for the avatar field.
 func (r *userResolver) Avatar(ctx context.Context, obj *model.User) (*string, error) {
-	panic(fmt.Errorf("not implemented: Avatar - avatar"))
+	if obj.AvatarURL == "" {
+		return nil, nil
+	}
+	// Similar to Nonprofit.Logo, adjust if it's a relative path vs. full URL
+	return &obj.AvatarURL, nil
 }
 
 // LinkedIn is the resolver for the linkedIn field.
 func (r *userResolver) LinkedIn(ctx context.Context, obj *model.User) (*string, error) {
-	panic(fmt.Errorf("not implemented: LinkedIn - linkedIn"))
+	if obj.LinkedInURL == "" {
+		return nil, nil
+	}
+	return &obj.LinkedInURL, nil
 }
 
 // Portfolio is the resolver for the portfolio field.
 func (r *userResolver) Portfolio(ctx context.Context, obj *model.User) (*string, error) {
-	panic(fmt.Errorf("not implemented: Portfolio - portfolio"))
+	if obj.PortfolioURL == "" {
+		return nil, nil
+	}
+	return &obj.PortfolioURL, nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *userResolver) CreatedAt(ctx context.Context, obj *model.User) (string, error) {
-	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+	return formatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *userResolver) UpdatedAt(ctx context.Context, obj *model.User) (string, error) {
-	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+	return formatTime(obj.UpdatedAt), nil
 }
 
-// HoursLogged is the resolver for the hoursLogged field.
+// HoursLogged fetches all hours logged by the user across engagements.
 func (r *userResolver) HoursLogged(ctx context.Context, obj *model.User) ([]*model.HoursLogged, error) {
-	panic(fmt.Errorf("not implemented: HoursLogged - hoursLogged"))
+	// Authorization: User can see their own hours. Admins might see others.
+	// The current implementation relies on 'obj' being the user in question.
+	// If this resolver is called for a user object that the current GraphQL client
+	// shouldn't have full access to (e.g. viewing another user's profile),
+	// you might want to restrict fields or apply privacy rules.
+	// For 'me.hoursLogged', this is fine. For 'user(id: "...").hoursLogged', consider auth.
+
+	var hours []*model.HoursLogged
+	err := r.DB.Model(&model.HoursLogged{}).
+		Joins("JOIN engagements ON engagements.id = hours_loggeds.engagement_id").
+		Where("engagements.volunteer_id = ?", obj.ID). // obj.ID is the ID of the User whose hours are being queried
+		Preload("Engagement").                         // Preload engagement for context if needed in HoursLogged type
+		Preload("ApprovedBy").                         // Preload user who approved
+		Order("date DESC").
+		Find(&hours).Error
+	if err != nil {
+		fmt.Printf("Error fetching hours logged for user %d: %v\n", obj.ID, err) // Replace with logger
+		return nil, fmt.Errorf("failed to fetch hours logged: %w", err)
+	}
+	return hours, nil
 }
 
-// Application returns ApplicationResolver implementation.
-func (r *Resolver) Application() ApplicationResolver { return &applicationResolver{r} }
+// Applications fetches applications made by this user.
+// This resolver was missing from your initial schema.resolvers.go but is defined in schema.graphqls User type.
+// Gqlgen would generate a panic for it if not implemented.
+func (r *userResolver) Applications(ctx context.Context, obj *model.User) ([]*model.Application, error) {
+	// Authorization: Generally, a user can see their own applications.
+	// If `obj` is not the currently authenticated user, consider if this data should be public.
+	// For simplicity, assuming if we have the user object `obj`, we can show their applications.
+	// The `Me` query would be the typical way a user sees their own.
+
+	var applications []*model.Application
+	// Using GORM's association feature if properly defined, or a direct query:
+	if err := r.DB.Where("volunteer_id = ?", obj.ID).
+		Preload("Project"). // Preload related project for context
+		Order("applied_at DESC").
+		Find(&applications).Error; err != nil {
+		fmt.Printf("Error fetching applications for user %d: %v\n", obj.ID, err) // Replace with logger
+		return nil, fmt.Errorf("failed to fetch applications: %w", err)
+	}
+	return applications, nil
+}
 
 // Availability returns AvailabilityResolver implementation.
 func (r *Resolver) Availability() AvailabilityResolver { return &availabilityResolver{r} }
@@ -340,8 +1589,21 @@ func (r *Resolver) Availability() AvailabilityResolver { return &availabilityRes
 // Cause returns CauseResolver implementation.
 func (r *Resolver) Cause() CauseResolver { return &causeResolver{r} }
 
-// Engagement returns EngagementResolver implementation.
-func (r *Resolver) Engagement() EngagementResolver { return &engagementResolver{r} }
+// Engagements fetches engagements for this user.
+// This resolver was missing from your initial schema.resolvers.go but is defined in schema.graphqls User type.
+func (r *userResolver) Engagements(ctx context.Context, obj *model.User) ([]*model.Engagement, error) {
+	// Similar authorization considerations as Applications resolver.
+	var engagements []*model.Engagement
+	if err := r.DB.Where("volunteer_id = ?", obj.ID).
+		Preload("Project").     // Preload related project
+		Preload("HoursLogged"). // Preload hours logged for this engagement
+		Order("start_date DESC").
+		Find(&engagements).Error; err != nil {
+		fmt.Printf("Error fetching engagements for user %d: %v\n", obj.ID, err) // Replace with logger
+		return nil, fmt.Errorf("failed to fetch engagements: %w", err)
+	}
+	return engagements, nil
+}
 
 // HoursLogged returns HoursLoggedResolver implementation.
 func (r *Resolver) HoursLogged() HoursLoggedResolver { return &hoursLoggedResolver{r} }

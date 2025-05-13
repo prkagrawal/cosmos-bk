@@ -62,7 +62,10 @@ func main() {
 	router.HandleFunc("/auth/google", auth.GoogleLoginHandler)
 	router.HandleFunc("/auth/google/callback", auth.GoogleCallbackHandler(authSvc))
 
-	srv := handler.New(graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{}}))
+	// Create the main resolver, passing in dependencies
+	resolver := graph.NewResolver(database.DB)
+
+	srv := handler.New(graph.NewExecutableSchema(graph.Config{Resolvers: resolver}))
 
 	// Configure transports
 	srv.AddTransport(transport.Options{})

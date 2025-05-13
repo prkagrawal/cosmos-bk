@@ -16,6 +16,16 @@ type Resolver struct {
 	AuthService *auth.AuthService
 }
 
+// type Resolver struct {
+// 	DB *database.Database
+// }
+
+// Application is a stub method to satisfy the ResolverRoot interface.
+func (r *Resolver) Application() string {
+	// Implement the method logic or return a placeholder value
+	return "Application method not implemented"
+}
+
 func NewResolver(db *gorm.DB) *Resolver {
 	return &Resolver{
 		DB:          db,

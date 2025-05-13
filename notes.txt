@@ -1,0 +1,1761 @@
+am working on a golang api, folder structure is ❯ tree
+.
+├── auth
+│   ├── auth.go
+│   ├── middleware.go
+│   └── oauth_google.go
+├── database
+│   └── database.go
+├── go.mod
+├── go.sum
+├── gqlgen.yml
+├── graph
+│   ├── generated.go
+│   ├── model
+│   │   ├── enums.go
+│   │   ├── models_gen.go
+│   │   ├── models.go
+│   │   ├── scalars.go
+│   │   └── todo.go
+│   ├── resolver.go
+│   ├── schema.graphqls
+│   └── schema.resolvers.go
+├── notes
+├── server.go
+├── services
+└── tools.go
+
+6 directories, 19 files server.go is package main
+
+import (
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/extension"
+	"github.com/99designs/gqlgen/graphql/handler/lru"
+	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/joho/godotenv"
+	"github.com/prkagrawal/cosmos-bk2/auth"
+	"github.com/prkagrawal/cosmos-bk2/database"
+	"github.com/prkagrawal/cosmos-bk2/graph"
+	"github.com/rs/zerolog"
+	"github.com/vektah/gqlparser/v2/ast"
+
+	_ "github.com/99designs/gqlgen/graphql"
+)
+
+const defaultPort = "8080"
+
+func main() {
+	// Initialize logger
+	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr}).
+		With().
+		Timestamp().
+		Logger()
+
+	// Load environment variables
+	if err := godotenv.Load(); err != nil {
+		logger.Fatal().Err(err).Msg("Error loading .env file")
+	}
+
+	// Initialize database
+	if err := database.Connect(); err != nil {
+		logger.Fatal().Err(err).Msg("Database connection failed")
+	}
+
+	if err := database.Migrate(); err != nil {
+		logger.Fatal().Err(err).Msg("Database migration failed")
+	}
+
+	// Create router
+	router := chi.NewRouter()
+
+	// Add middleware
+	router.Use(middleware.RequestID)
+	router.Use(middleware.RealIP)
+	router.Use(zerologLogger(&logger))
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.Timeout(60 * time.Second))
+
+	// Initialize auth service
+	authSvc := auth.NewAuthService(database.DB)
+
+	// Setup routes
+	router.HandleFunc("/auth/google", auth.GoogleLoginHandler)
+	router.HandleFunc("/auth/google/callback", auth.GoogleCallbackHandler(authSvc))
+
+	// Create the main resolver, passing in dependencies
+	resolver := graph.NewResolver(database.DB)
+
+	srv := handler.New(graph.NewExecutableSchema(graph.Config{Resolvers: resolver}))
+
+	// Configure transports
+	srv.AddTransport(transport.Options{})
+	srv.AddTransport(transport.GET{})
+	srv.AddTransport(transport.POST{})
+	srv.AddTransport(transport.MultipartForm{})
+
+	// Configure extensions
+	if os.Getenv("ENVIRONMENT") == "development" {
+		srv.Use(extension.Introspection{})
+		srv.Use(extension.AutomaticPersistedQuery{
+			Cache: lru.New[string](100),
+		})
+	}
+
+	srv.SetQueryCache(lru.New[*ast.QueryDocument](1000))
+	srv.Use(extension.FixedComplexityLimit(300))
+
+	// Setup GraphQL routes
+	router.Handle("/", playground.Handler("GraphQL Playground", "/query"))
+	router.Handle("/query", srv)
+
+	// Start server
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = defaultPort
+	}
+
+	logger.Info().Msgf("Server starting on :%s", port)
+	if err := http.ListenAndServe(":"+port, router); err != nil {
+		logger.Fatal().Err(err).Msg("Server failed to start")
+	}
+}
+
+// zerologLogger middleware for chi
+func zerologLogger(logger *zerolog.Logger) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+
+			defer func() {
+				// Log panics
+				if rec := recover(); rec != nil {
+					logger.Error().
+						Str("path", r.URL.Path).
+						Interface("recover_info", rec).
+						Msg("Panic occurred")
+					http.Error(ww, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				}
+
+				// Log the request
+				logger.Info().
+					Str("method", r.Method).
+					Str("path", r.URL.Path).
+					Int("status", ww.Status()).
+					Dur("duration", time.Since(start)).
+					Msg("Request handled")
+			}()
+
+			next.ServeHTTP(ww, r)
+		})
+	}
+}
+gqlgen.yml is # Where are all the schema files located? globs are supported eg  src/**/*.graphqls
+schema:
+  - graph/*.graphqls
+
+# Where should the generated server code go?
+exec:
+  package: graph
+  layout: single-file # Only other option is "follow-schema," ie multi-file.
+
+  # Only for single-file layout:
+  filename: graph/generated.go
+
+  # Only for follow-schema layout:
+  # dir: graph
+  # filename_template: "{name}.generated.go"
+
+  # Optional: Maximum number of goroutines in concurrency to use per child resolvers(default: unlimited)
+  # worker_limit: 1000
+
+# Uncomment to enable federation
+# federation:
+#   filename: graph/federation.go
+#   package: graph
+#   version: 2
+#   options:
+#     computed_requires: true
+
+# Where should any generated models go?
+model:
+  filename: graph/model/models_gen.go
+  package: model
+
+  # Optional: Pass in a path to a new gotpl template to use for generating the models
+  # model_template: [your/path/model.gotpl]
+
+# Where should the resolver implementations go?
+resolver:
+  package: graph
+  layout: follow-schema # Only other option is "single-file."
+
+  # Only for single-file layout:
+  # filename: graph/resolver.go
+
+  # Only for follow-schema layout:
+  dir: graph
+  filename_template: "{name}.resolvers.go"
+
+  # Optional: turn on to not generate template comments above resolvers
+  # omit_template_comment: false
+  # Optional: Pass in a path to a new gotpl template to use for generating resolvers
+  # resolver_template: [your/path/resolver.gotpl]
+  # Optional: turn on to avoid rewriting existing resolver(s) when generating
+  # preserve_resolver: false
+
+# Optional: turn on use ` + "`" + `gqlgen:"fieldName"` + "`" + ` tags in your models
+# struct_tag: json
+
+# Optional: turn on to use []Thing instead of []*Thing
+# omit_slice_element_pointers: false
+
+# Optional: turn on to omit Is<Name>() methods to interface and unions
+# omit_interface_checks: true
+
+# Optional: turn on to skip generation of ComplexityRoot struct content and Complexity function
+# omit_complexity: false
+
+# Optional: turn on to not generate any file notice comments in generated files
+# omit_gqlgen_file_notice: false
+
+# Optional: turn on to exclude the gqlgen version in the generated file notice. No effect if `omit_gqlgen_file_notice` is true.
+# omit_gqlgen_version_in_file_notice: false
+
+# Optional: turn on to exclude root models such as Query and Mutation from the generated models file.
+# omit_root_models: false
+
+# Optional: turn on to exclude resolver fields from the generated models file.
+# omit_resolver_fields: false
+
+# Optional: turn off to make struct-type struct fields not use pointers
+# e.g. type Thing struct { FieldA OtherThing } instead of { FieldA *OtherThing }
+# struct_fields_always_pointers: true
+
+# Optional: turn off to make resolvers return values instead of pointers for structs
+# resolvers_always_return_pointers: true
+
+# Optional: turn on to return pointers instead of values in unmarshalInput
+# return_pointers_in_unmarshalinput: false
+
+# Optional: wrap nullable input fields with Omittable
+# nullable_input_omittable: true
+
+# Optional: set to speed up generation time by not performing a final validation pass.
+# skip_validation: true
+
+# Optional: set to skip running `go mod tidy` when generating server code
+# skip_mod_tidy: true
+
+# Optional: if this is set to true, argument directives that
+# decorate a field with a null value will still be called.
+#
+# This enables argumment directives to not just mutate
+# argument values but to set them even if they're null.
+call_argument_directives_with_null: true
+
+# This enables gql server to use function syntax for execution context
+# instead of generating receiver methods of the execution context.
+# use_function_syntax_for_execution_context: true
+
+# Optional: set build tags that will be used to load packages
+# go_build_tags:
+#  - private
+#  - enterprise
+
+# Optional: set to modify the initialisms regarded for Go names
+# go_initialisms:
+#   replace_defaults: false # if true, the default initialisms will get dropped in favor of the new ones instead of being added
+#   initialisms: # List of initialisms to for Go names
+#     - 'CC'
+#     - 'BCC'
+
+# gqlgen will search for any type names in the schema in these go packages
+# if they match it will use them, otherwise it will generate them.
+autobind:
+ - "github.com/prkagrawal/cosmos-bk2/graph/model"
+
+# This section declares type mapping between the GraphQL and go type systems
+#
+# The first line in each type will be used as defaults for resolver arguments and
+# modelgen, the others will be allowed when binding to fields. Configure them to
+# your liking
+models:
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+  # gqlgen provides a default GraphQL UUID convenience wrapper for github.com/google/uuid 
+  # but you can override this to provide your own GraphQL UUID implementation
+  UUID:
+    model:
+      - github.com/99designs/gqlgen/graphql.UUID
+
+  # The GraphQL spec explicitly states that the Int type is a signed 32-bit
+  # integer. Using Go int or int64 to represent it can lead to unexpected
+  # behavior, and some GraphQL tools like Apollo Router will fail when
+  # communicating numbers that overflow 32-bits.
+  #
+  # You may choose to use the custom, built-in Int64 scalar to represent 64-bit
+  # integers, or ignore the spec and bind Int to graphql.Int / graphql.Int64
+  # (the default behavior of gqlgen). This is fine in simple use cases when you
+  # do not need to worry about interoperability and only expect small numbers.
+  Int:
+    model:
+      - github.com/99designs/gqlgen/graphql.Int32
+  Int64:
+    model:
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+  
+  # DateTime:
+  #   model: github.com/99designs/gqlgen/graphql.DateTime
+  Upload:
+    model: github.com/99designs/gqlgen/graphql.Upload
+  
+  Weekday:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.Weekday
+  UserRole:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.UserRole
+  ProjectStatus:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.ProjectStatus
+  ApplicationStatus:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.ApplicationStatus
+  EngagementStatus:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.EngagementStatus
+  NonprofitSize:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.NonprofitSize
+  TimeCommitment:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.TimeCommitment
+  UrgencyLevel:
+    model: github.com/prkagrawal/cosmos-bk2/graph/model.UrgencyLevel                   database.go is package database
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/prkagrawal/cosmos-bk2/graph/model"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+var DB *gorm.DB
+
+func Connect() error {
+	dsn := os.Getenv("DATABASE_URL")
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+		SkipDefaultTransaction:                   true,
+		Logger:                                   logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	DB = db
+	return nil
+}
+
+func Migrate() error {
+	// First migrate all other tables
+	err := DB.AutoMigrate(
+		&model.User{},
+		&model.Skill{},
+		&model.Cause{},
+		&model.Nonprofit{},
+		&model.Project{},
+		&model.Application{},
+		&model.Engagement{},
+		&model.HoursLogged{},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Manually handle the days_available column conversion
+	return DB.Transaction(func(tx *gorm.DB) error {
+		// Add new temporary column
+		if err := tx.Exec(`
+					ALTER TABLE users 
+					ADD COLUMN days_available_temp jsonb
+			`).Error; err != nil {
+			return err
+		}
+
+		// Convert data from old column to new
+		if err := tx.Exec(`
+					UPDATE users 
+					SET days_available_temp = to_jsonb(days_available::text::jsonb)
+			`).Error; err != nil {
+			return err
+		}
+
+		// Drop old column
+		if err := tx.Exec(`
+					ALTER TABLE users 
+					DROP COLUMN days_available
+			`).Error; err != nil {
+			return err
+		}
+
+		// Rename temporary column
+		return tx.Exec(`
+					ALTER TABLE users 
+					RENAME COLUMN days_available_temp TO days_available
+			`).Error
+	})
+}
+auth.go is package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/prkagrawal/cosmos-bk2/database"
+	"github.com/prkagrawal/cosmos-bk2/graph/model"
+)
+
+type AuthService struct {
+	DB *gorm.DB
+}
+
+func NewAuthService(db *gorm.DB) *AuthService {
+	return &AuthService{DB: db}
+}
+
+func (a *AuthService) CreateUser(ctx context.Context, input model.SignupInput) (*model.User, error) {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("password hashing failed: %w", err)
+	}
+
+	user := model.User{
+		Email:        input.Email,
+		PasswordHash: string(hashedPassword),
+		FirstName:    input.FirstName,
+		LastName:     input.LastName,
+		Role:         input.Role,
+	}
+
+	result := a.DB.Create(&user)
+	if result.Error != nil {
+		return nil, fmt.Errorf("user creation failed: %w", result.Error)
+	}
+
+	return &user, nil
+}
+
+func (a *AuthService) Authenticate(ctx context.Context, email, password string) (*model.User, error) {
+	var user model.User
+	if err := a.DB.Where("email = ?", email).First(&user).Error; err != nil {
+		return nil, errors.New("invalid credentials")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, errors.New("invalid credentials")
+	}
+
+	return &user, nil
+}
+
+func GenerateJWT(user *model.User) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  user.ID,
+		"role": user.Role,
+		"exp":  time.Now().Add(time.Hour * 24 * 7).Unix(),
+	})
+
+	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+}
+
+func GetUserFromContext(ctx context.Context) (*model.User, error) {
+	userCtx := ctx.Value("user")
+	if userCtx == nil {
+		return nil, errors.New("not authenticated")
+	}
+
+	token := userCtx.(*jwt.Token)
+	claims := token.Claims.(jwt.MapClaims)
+	userID := claims["sub"].(string)
+
+	var user model.User
+	if err := database.DB.First(&user, "id = ?", userID).Error; err != nil {
+		return nil, fmt.Errorf("user not found: %w", err)
+	}
+
+	return &user, nil
+}
+middleware.go is currently empty oauth_google.go is package auth
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"os"
+
+	"github.com/prkagrawal/cosmos-bk2/graph/model"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+)
+
+var GoogleOAuthConfig = &oauth2.Config{
+	ClientID:     os.Getenv("GOOGLE_OAUTH_CLIENT_ID"),
+	ClientSecret: os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+	RedirectURL:  os.Getenv("FRONTEND_URL") + "/auth/google/callback",
+	Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"},
+	Endpoint:     google.Endpoint,
+}
+
+func GoogleLoginHandler(w http.ResponseWriter, r *http.Request) {
+	url := GoogleOAuthConfig.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+func GoogleCallbackHandler(authSvc *AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+
+		token, err := GoogleOAuthConfig.Exchange(context.Background(), code)
+		if err != nil {
+			http.Error(w, "Failed to exchange token", http.StatusBadRequest)
+			return
+		}
+
+		client := GoogleOAuthConfig.Client(context.Background(), token)
+		resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+		if err != nil {
+			http.Error(w, "Failed to get user info", http.StatusBadRequest)
+			return
+		}
+		defer resp.Body.Close()
+
+		var userInfo struct {
+			Email      string `json:"email"`
+			Name       string `json:"name"`
+			GivenName  string `json:"given_name"`
+			FamilyName string `json:"family_name"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+			http.Error(w, "Failed to decode user info", http.StatusBadRequest)
+			return
+		}
+
+		// Handle user creation/login logic
+		var user model.User
+		if err := authSvc.DB.Where("email = ?", userInfo.Email).First(&user).Error; err != nil {
+			// Create new user
+			user = model.User{
+				Email:     userInfo.Email,
+				FirstName: userInfo.GivenName,
+				LastName:  userInfo.FamilyName,
+				Role:      model.Volunteer,
+			}
+			if err := authSvc.DB.Create(&user).Error; err != nil {
+				http.Error(w, "Failed to create user", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Generate JWT and return to frontend
+		jwtToken, err := GenerateJWT(&user)
+		if err != nil {
+			http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+			return
+		}
+
+		http.Redirect(w, r, os.Getenv("FRONTEND_URL")+"?token="+jwtToken, http.StatusTemporaryRedirect)
+	}
+}
+ enums.go is package model
+
+type Weekday string
+type UserRole string
+type ProjectStatus string
+type ApplicationStatus string
+type EngagementStatus string
+type NonprofitSize string
+type TimeCommitment string
+type UrgencyLevel string
+
+const (
+	Monday    Weekday = "MONDAY"
+	Tuesday   Weekday = "TUESDAY"
+	Wednesday Weekday = "WEDNESDAY"
+	Thursday  Weekday = "THURSDAY"
+	Friday    Weekday = "FRIDAY"
+	Saturday  Weekday = "SATURDAY"
+	Sunday    Weekday = "SUNDAY"
+)
+
+const (
+	Volunteer      UserRole = "VOLUNTEER"
+	NonprofitAdmin UserRole = "NONPROFIT_ADMIN"
+	PlatformAdmin  UserRole = "PLATFORM_ADMIN"
+)
+
+const (
+	Draft         ProjectStatus = "DRAFT"
+	PendingReview ProjectStatus = "PENDING_REVIEW"
+	Active        ProjectStatus = "ACTIVE"
+	InProgress    ProjectStatus = "IN_PROGRESS"
+	Completed     ProjectStatus = "COMPLETED"
+	Cancelled     ProjectStatus = "CANCELLED"
+)
+
+const (
+	Pending   ApplicationStatus = "PENDING"
+	Accepted  ApplicationStatus = "ACCEPTED"
+	Rejected  ApplicationStatus = "REJECTED"
+	Withdrawn ApplicationStatus = "WITHDRAWN"
+)
+
+const (
+	EngagementActive    EngagementStatus = "ACTIVE"
+	EngagementCompleted EngagementStatus = "COMPLETED"
+	EngagementCancelled EngagementStatus = "CANCELLED"
+)
+
+const (
+	Small     NonprofitSize = "SMALL"
+	Medium    NonprofitSize = "MEDIUM"
+	Large     NonprofitSize = "LARGE"
+	VeryLarge NonprofitSize = "VERY_LARGE"
+)
+
+const (
+	LessThan5Hours      TimeCommitment = "LESS_THAN_5_HOURS"
+	FiveToTenHours      TimeCommitment = "FIVE_TO_TEN_HOURS"
+	TenToTwentyHours    TimeCommitment = "TEN_TO_TWENTY_HOURS"
+	MoreThanTwentyHours TimeCommitment = "MORE_THAN_TWENTY_HOURS"
+)
+
+const (
+	Low      UrgencyLevel = "LOW"
+	Mid      UrgencyLevel = "MEDIUM"
+	High     UrgencyLevel = "HIGH"
+	Critical UrgencyLevel = "CRITICAL"
+)
+models_gen.go is // Code generated by github.com/99designs/gqlgen, DO NOT EDIT.
+
+package model
+
+import (
+	"github.com/99designs/gqlgen/graphql"
+)
+
+type AuthPayload struct {
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
+	User         *User  `json:"user"`
+}
+
+type AvailabilityFilter struct {
+	HoursPerWeekMin *int32    `json:"hoursPerWeekMin,omitempty"`
+	DaysAvailable   []Weekday `json:"daysAvailable,omitempty"`
+}
+
+type AvailabilityInput struct {
+	HoursPerWeek  int32     `json:"hoursPerWeek"`
+	DaysAvailable []Weekday `json:"daysAvailable"`
+	Timezone      string    `json:"timezone"`
+}
+
+type LocationInput struct {
+	City    string `json:"city"`
+	State   string `json:"state"`
+	Country string `json:"country"`
+	Remote  bool   `json:"remote"`
+}
+
+type Mutation struct {
+}
+
+type NonprofitInput struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Website     string          `json:"website"`
+	Ein         string          `json:"ein"`
+	Size        NonprofitSize   `json:"size"`
+	Causes      []string        `json:"causes"`
+	Location    *LocationInput  `json:"location"`
+	Logo        *graphql.Upload `json:"logo,omitempty"`
+}
+
+type ProfileInput struct {
+	FirstName *string         `json:"firstName,omitempty"`
+	LastName  *string         `json:"lastName,omitempty"`
+	Bio       *string         `json:"bio,omitempty"`
+	LinkedIn  *string         `json:"linkedIn,omitempty"`
+	Portfolio *string         `json:"portfolio,omitempty"`
+	Avatar    *graphql.Upload `json:"avatar,omitempty"`
+	Causes    []string        `json:"causes,omitempty"`
+}
+
+type ProjectInput struct {
+	NonprofitID    string         `json:"nonprofitId"`
+	Title          string         `json:"title"`
+	Description    string         `json:"description"`
+	SkillsNeeded   []string       `json:"skillsNeeded"`
+	TimeCommitment TimeCommitment `json:"timeCommitment"`
+	Urgency        UrgencyLevel   `json:"urgency"`
+	StartDate      *string        `json:"startDate,omitempty"`
+	EndDate        *string        `json:"endDate,omitempty"`
+}
+
+type Query struct {
+}
+
+type SignupInput struct {
+	Email     string   `json:"email"`
+	Password  string   `json:"password"`
+	FirstName string   `json:"firstName"`
+	LastName  string   `json:"lastName"`
+	Role      UserRole `json:"role"`
+}
+
+type Subscription struct {
+}
+models.go is package model
+
+import (
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// Custom type for weekday array
+type Weekdays []Weekday
+
+func (w *Weekdays) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		return errors.New("invalid weekday array")
+	}
+	return json.Unmarshal(bytes, w)
+}
+
+func (w Weekdays) Value() (driver.Value, error) {
+	return json.Marshal(w)
+}
+
+type User struct {
+	gorm.Model
+	Email        string `gorm:"uniqueIndex;not null"`
+	PasswordHash string
+	FirstName    string
+	LastName     string
+	AvatarURL    string
+	Role         UserRole `gorm:"type:varchar(20);index"`
+	Bio          string
+	LinkedInURL  string
+	PortfolioURL string
+	Skills       []Skill      `gorm:"many2many:user_skills;"`
+	Causes       []Cause      `gorm:"many2many:user_causes;"`
+	Availability Availability `gorm:"embedded"`
+
+	// Relationships
+	Applications []Application `gorm:"foreignKey:VolunteerID"`
+	Engagements  []Engagement  `gorm:"foreignKey:VolunteerID"`
+}
+
+type Nonprofit struct {
+	gorm.Model
+	Name        string
+	Description string
+	LogoURL     string
+	Website     string
+	EIN         string        `gorm:"uniqueIndex"`
+	Verified    bool          `gorm:"index"`
+	Size        NonprofitSize `gorm:"type:varchar(20)"`
+	Causes      []Cause       `gorm:"many2many:nonprofit_causes;"`
+	Location    Location      `gorm:"embedded"`
+	Members     []User        `gorm:"many2many:nonprofit_members;"`
+	Projects    []Project     `gorm:"foreignKey:NonprofitID"`
+}
+
+type Project struct {
+	gorm.Model
+	Title        string
+	Description  string
+	SkillsNeeded []Skill `gorm:"many2many:project_skills;"`
+
+	TimeCommitment TimeCommitment `gorm:"type:varchar(30)"`
+	Urgency        UrgencyLevel   `gorm:"type:varchar(10)"`
+	Status         ProjectStatus  `gorm:"type:varchar(20);index"`
+	StartDate      *time.Time
+	EndDate        *time.Time
+	NonprofitID    uint
+
+	// Relationships
+	Applications []Application `gorm:"foreignKey:ProjectID"`
+	Engagements  []Engagement  `gorm:"foreignKey:ProjectID"`
+}
+
+type Availability struct {
+	HoursPerWeek  int      `gorm:"type:int"`
+	DaysAvailable Weekdays `gorm:"type:jsonb"`
+	Timezone      string   `gorm:"type:varchar(50)"`
+}
+
+type Location struct {
+	City    string `gorm:"type:varchar(100)"`
+	State   string `gorm:"type:varchar(100)"`
+	Country string `gorm:"type:varchar(100)"`
+	Remote  bool
+}
+
+type Application struct {
+	gorm.Model
+	Message   *string
+	Status    ApplicationStatus `gorm:"type:varchar(20);index"`
+	AppliedAt time.Time
+	DecidedAt *time.Time
+
+	// Relationships
+	VolunteerID uint
+	Volunteer   User `gorm:"foreignKey:VolunteerID"`
+
+	ProjectID uint
+	Project   Project `gorm:"foreignKey:ProjectID"`
+}
+
+type Engagement struct {
+	gorm.Model
+	StartDate           time.Time
+	EndDate             *time.Time
+	Status              EngagementStatus `gorm:"type:varchar(20);index"`
+	Feedback            *string
+	FeedbackSubmittedAt *time.Time
+
+	// Relationships
+	VolunteerID uint
+	Volunteer   User `gorm:"foreignKey:VolunteerID"`
+
+	ProjectID uint
+	Project   Project `gorm:"foreignKey:ProjectID"`
+
+	HoursLogged []HoursLogged `gorm:"foreignKey:EngagementID"`
+}
+
+type HoursLogged struct {
+	gorm.Model
+	Date        time.Time
+	Hours       float64
+	Description *string
+	Approved    *bool
+	ApprovedAt  *time.Time
+
+	// Relationships
+	EngagementID uint
+	Engagement   Engagement `gorm:"foreignKey:EngagementID"`
+
+	ApprovedByID *uint
+	ApprovedBy   User `gorm:"foreignKey:ApprovedByID"`
+}
+
+type Skill struct {
+	gorm.Model
+	Name     string `gorm:"uniqueIndex"`
+	Category string
+}
+
+type Cause struct {
+	gorm.Model
+	Name        string `gorm:"uniqueIndex"`
+	Description string
+}
+scalars.go is package model
+
+import (
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+)
+
+// Implement Scanner/Valuer for custom enums
+func (w *Weekday) Scan(value interface{}) error {
+	if s, ok := value.(string); ok {
+		*w = Weekday(s)
+		return nil
+	}
+	return errors.New("invalid weekday value")
+}
+
+func (w Weekday) Value() (driver.Value, error) {
+	return string(w), nil
+}
+
+// Implement similar for other enums if needed
+// ...
+
+// Custom JSON handling for Weekdays
+func (w *Weekdays) UnmarshalJSON(data []byte) error {
+	var days []Weekday
+	if err := json.Unmarshal(data, &days); err != nil {
+		return err
+	}
+	*w = days
+	return nil
+}
+
+func (w Weekdays) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]Weekday(w))
+}
+resolver.go is package graph
+
+import (
+	"github.com/prkagrawal/cosmos-bk2/auth"
+	"github.com/prkagrawal/cosmos-bk2/database"
+	"gorm.io/gorm"
+)
+
+// This file will not be regenerated automatically.
+//
+// It serves as dependency injection for your app, add any dependencies you require here.
+
+type Resolver struct {
+	// todos []*model.Todo
+	DB          *gorm.DB
+	AuthService *auth.AuthService
+}
+
+func NewResolver(db *gorm.DB) *Resolver {
+	return &Resolver{
+		DB:          db,
+		AuthService: auth.NewAuthService(database.DB),
+	}
+}
+ schema.graphqls is # GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+# type Todo {
+#   id: ID!
+#   text: String!
+#   done: Boolean!
+#   user: User!
+# }
+
+# type User {
+#   id: ID!
+#   name: String!
+# }
+
+# input NewTodo {
+#   text: String!
+#   userId: String!
+# }
+
+scalar DateTime
+scalar Upload
+
+type Query {
+  # todos: [Todo!]!
+  # users: [User!]
+
+  # User queries
+  me: User!
+  user(id: ID!): User
+  users(skills: [String!], availability: AvailabilityFilter, role: UserRole): [User!]!
+  
+  # Nonprofit queries
+  nonprofit(id: ID!): Nonprofit
+  nonprofits(
+    causes: [String!], 
+    size: NonprofitSize, 
+    verifiedOnly: Boolean,
+    search: String
+  ): [Nonprofit!]!
+  
+  # Project queries
+  project(id: ID!): Project
+  projects(
+    status: ProjectStatus,
+    skillsNeeded: [String!],
+    timeCommitment: TimeCommitment,
+    urgency: UrgencyLevel,
+    nonprofitId: ID
+  ): [Project!]!
+  
+  # Matching queries
+  recommendedProjects(limit: Int = 10): [Project!]!
+  recommendedVolunteers(projectId: ID!, limit: Int = 5): [User!]!
+  
+  # Misc queries
+  skills: [Skill!]!
+  causes: [Cause!]!
+}
+
+type Mutation {
+  # createTodo(input: NewTodo!): Todo!
+
+  # Auth mutations
+  login(email: String!, password: String!): AuthPayload!
+  signup(input: SignupInput!): AuthPayload!
+  refreshToken(token: String!): AuthPayload!
+  
+  # User mutations
+  updateProfile(input: ProfileInput!): User!
+  addSkills(skills: [String!]!): User!
+  removeSkill(skill: String!): User!
+  setAvailability(input: AvailabilityInput!): User!
+  
+  # Nonprofit mutations
+  createNonprofit(input: NonprofitInput!): Nonprofit!
+  updateNonprofit(id: ID!, input: NonprofitInput!): Nonprofit!
+  verifyNonprofit(id: ID!): Nonprofit!
+  
+  # Project mutations
+  createProject(input: ProjectInput!): Project!
+  updateProject(id: ID!, input: ProjectInput!): Project!
+  changeProjectStatus(id: ID!, status: ProjectStatus!): Project!
+  applyToProject(projectId: ID!, message: String): Application!
+  acceptApplication(applicationId: ID!): Application!
+  rejectApplication(applicationId: ID!): Application!
+  
+  # Engagement mutations
+  startVolunteering(projectId: ID!): Engagement!
+  completeEngagement(engagementId: ID!, feedback: String): Engagement!
+  logHours(engagementId: ID!, hours: Float!, date: DateTime!, description: String): HoursLogged!
+}
+
+type Subscription {
+  projectUpdated(projectId: ID!): Project!
+  applicationReceived: Application!
+  engagementStarted: Engagement!
+}
+
+# Types
+type Availability {
+  hoursPerWeek: Int!
+  daysAvailable: [Weekday!]!
+  timezone: String!
+}
+
+type User {
+  id: ID!
+  email: String!
+  firstName: String!
+  lastName: String!
+  avatar: String
+  role: UserRole!
+  skills: [Skill!]!
+  availability: Availability
+  causes: [Cause!]!
+  bio: String
+  linkedIn: String
+  portfolio: String
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  applications: [Application!]!
+  engagements: [Engagement!]!
+  hoursLogged: [HoursLogged!]!
+}
+
+type Nonprofit {
+  id: ID!
+  name: String!
+  description: String!
+  logo: String
+  website: String!
+  ein: String!
+  verified: Boolean!
+  size: NonprofitSize!
+  causes: [Cause!]!
+  location: Location!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  projects: [Project!]!
+  members: [User!]!
+}
+
+type Project {
+  id: ID!
+  title: String!
+  description: String!
+  skillsNeeded: [Skill!]!
+  timeCommitment: TimeCommitment!
+  urgency: UrgencyLevel!
+  status: ProjectStatus!
+  startDate: DateTime
+  endDate: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # Relationships
+  nonprofit: Nonprofit!
+  applications: [Application!]!
+  engagements: [Engagement!]!
+}
+
+type Application {
+  id: ID!
+  message: String
+  status: ApplicationStatus!
+  appliedAt: DateTime!
+  decidedAt: DateTime
+  
+  # Relationships
+  volunteer: User!
+  project: Project!
+}
+
+type Engagement {
+  id: ID!
+  startDate: DateTime!
+  endDate: DateTime
+  status: EngagementStatus!
+  feedback: String
+  feedbackSubmittedAt: DateTime
+  
+  # Relationships
+  volunteer: User!
+  project: Project!
+  hoursLogged: [HoursLogged!]!
+}
+
+type HoursLogged {
+  id: ID!
+  date: DateTime!
+  hours: Float!
+  description: String
+  approved: Boolean
+  approvedAt: DateTime
+  
+  # Relationships
+  engagement: Engagement!
+  approvedBy: User
+}
+
+type Skill {
+  id: ID!
+  name: String!
+  category: String!
+}
+
+type Cause {
+  id: ID!
+  name: String!
+  description: String!
+}
+
+type Location {
+  city: String!
+  state: String!
+  country: String!
+  remote: Boolean!
+}
+
+type AuthPayload {
+  token: String!
+  refreshToken: String!
+  user: User!
+}
+
+# Input Types
+input SignupInput {
+  email: String!
+  password: String!
+  firstName: String!
+  lastName: String!
+  role: UserRole!
+}
+
+input ProfileInput {
+  firstName: String
+  lastName: String
+  bio: String
+  linkedIn: String
+  portfolio: String
+  avatar: Upload
+  causes: [String!]
+}
+
+input AvailabilityInput {
+  hoursPerWeek: Int!
+  daysAvailable: [Weekday!]!
+  timezone: String!
+}
+
+input NonprofitInput {
+  name: String!
+  description: String!
+  website: String!
+  ein: String!
+  size: NonprofitSize!
+  causes: [String!]!
+  location: LocationInput!
+  logo: Upload
+}
+
+input LocationInput {
+  city: String!
+  state: String!
+  country: String!
+  remote: Boolean!
+}
+
+input ProjectInput {
+  nonprofitId: ID!
+  title: String!
+  description: String!
+  skillsNeeded: [String!]!
+  timeCommitment: TimeCommitment!
+  urgency: UrgencyLevel!
+  startDate: DateTime
+  endDate: DateTime
+}
+
+# Enums
+enum UserRole {
+  VOLUNTEER
+  NONPROFIT_ADMIN
+  PLATFORM_ADMIN
+}
+
+enum ProjectStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ApplicationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+enum EngagementStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum NonprofitSize {
+  SMALL
+  MEDIUM
+  LARGE
+  VERY_LARGE
+}
+
+enum TimeCommitment {
+  LESS_THAN_5_HOURS
+  FIVE_TO_TEN_HOURS
+  TEN_TO_TWENTY_HOURS
+  MORE_THAN_TWENTY_HOURS
+}
+
+enum UrgencyLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum Weekday {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+# Filter Inputs
+input AvailabilityFilter {
+  hoursPerWeekMin: Int
+  daysAvailable: [Weekday!]
+}
+and finally schema.resolvers.go is package graph
+
+// This file will be automatically regenerated based on the schema, any resolver implementations
+// will be copied through when generating and any unknown code will be moved to the end.
+// Code generated by github.com/99designs/gqlgen version v0.17.73
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/prkagrawal/cosmos-bk2/auth"
+	"github.com/prkagrawal/cosmos-bk2/graph/model"
+	"gorm.io/gorm"
+)
+
+// ID is the resolver for the id field.
+func (r *applicationResolver) ID(ctx context.Context, obj *model.Application) (string, error) {
+	// obj is the *model.Application fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// AppliedAt is the resolver for the appliedAt field.
+func (r *applicationResolver) AppliedAt(ctx context.Context, obj *model.Application) (string, error) {
+	panic(fmt.Errorf("not implemented: AppliedAt - appliedAt"))
+}
+
+// DecidedAt is the resolver for the decidedAt field.
+func (r *applicationResolver) DecidedAt(ctx context.Context, obj *model.Application) (*string, error) {
+	panic(fmt.Errorf("not implemented: DecidedAt - decidedAt"))
+}
+
+// HoursPerWeek converts int to int32 for GraphQL Int.
+func (r *availabilityResolver) HoursPerWeek(ctx context.Context, obj *model.Availability) (int32, error) {
+	// Availability is embedded, obj is already populated by parent resolver
+	return int32(obj.HoursPerWeek), nil
+}
+
+// DaysAvailable returns the slice directly.
+func (r *availabilityResolver) DaysAvailable(ctx context.Context, obj *model.Availability) ([]model.Weekday, error) {
+	// Availability is embedded, obj is already populated by parent resolver
+	return obj.DaysAvailable, nil
+}
+
+// ID is the resolver for the id field.
+func (r *causeResolver) ID(ctx context.Context, obj *model.Cause) (string, error) {
+	// obj is the *model.Cause fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// ID is the resolver for the id field.
+func (r *engagementResolver) ID(ctx context.Context, obj *model.Engagement) (string, error) {
+	// obj is the *model.Engagement fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// StartDate is the resolver for the startDate field.
+func (r *engagementResolver) StartDate(ctx context.Context, obj *model.Engagement) (string, error) {
+	panic(fmt.Errorf("not implemented: StartDate - startDate"))
+}
+
+// EndDate is the resolver for the endDate field.
+func (r *engagementResolver) EndDate(ctx context.Context, obj *model.Engagement) (*string, error) {
+	panic(fmt.Errorf("not implemented: EndDate - endDate"))
+}
+
+// FeedbackSubmittedAt is the resolver for the feedbackSubmittedAt field.
+func (r *engagementResolver) FeedbackSubmittedAt(ctx context.Context, obj *model.Engagement) (*string, error) {
+	panic(fmt.Errorf("not implemented: FeedbackSubmittedAt - feedbackSubmittedAt"))
+}
+
+// ID is the resolver for the id field.
+func (r *hoursLoggedResolver) ID(ctx context.Context, obj *model.HoursLogged) (string, error) {
+	// obj is the *model.User fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// Date is the resolver for the date field.
+func (r *hoursLoggedResolver) Date(ctx context.Context, obj *model.HoursLogged) (string, error) {
+	panic(fmt.Errorf("not implemented: Date - date"))
+}
+
+// ApprovedAt is the resolver for the approvedAt field.
+func (r *hoursLoggedResolver) ApprovedAt(ctx context.Context, obj *model.HoursLogged) (*string, error) {
+	panic(fmt.Errorf("not implemented: ApprovedAt - approvedAt"))
+}
+
+// Login is the resolver for the login field.
+func (r *mutationResolver) Login(ctx context.Context, email string, password string) (*model.AuthPayload, error) {
+	panic(fmt.Errorf("not implemented: Login - login"))
+}
+
+// Signup is the resolver for the signup field.
+func (r *mutationResolver) Signup(ctx context.Context, input model.SignupInput) (*model.AuthPayload, error) {
+	// Access the AuthService from the receiver 'r'
+	newUser, err := r.AuthService.CreateUser(ctx, input)
+	if err != nil {
+		// Log the error
+		// logger.Error().Err(err).Msg("Signup failed during user creation")
+		// Consider returning more specific GraphQL errors later
+		return nil, fmt.Errorf("signup failed: %w", err)
+	}
+
+	// Generate JWT for the new user
+	tokenString, err := auth.GenerateJWT(newUser)
+	if err != nil {
+		// Log the error
+		// logger.Error().Err(err).Msg("Signup failed during token generation")
+		return nil, fmt.Errorf("could not generate token after signup: %w", err)
+	}
+
+	// For now, let's return an empty refresh token. Implement refresh logic later.
+	refreshTokenString := "" // TODO: Implement refresh token generation and storage
+
+	// Construct the response payload
+	authPayload := &model.AuthPayload{
+		Token:        tokenString,
+		RefreshToken: refreshTokenString,
+		User:         newUser, // newUser is already a *model.User
+	}
+
+	return authPayload, nil
+}
+
+// RefreshToken is the resolver for the refreshToken field.
+func (r *mutationResolver) RefreshToken(ctx context.Context, token string) (*model.AuthPayload, error) {
+	panic(fmt.Errorf("not implemented: RefreshToken - refreshToken"))
+}
+
+// UpdateProfile is the resolver for the updateProfile field.
+func (r *mutationResolver) UpdateProfile(ctx context.Context, input model.ProfileInput) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: UpdateProfile - updateProfile"))
+}
+
+// AddSkills is the resolver for the addSkills field.
+func (r *mutationResolver) AddSkills(ctx context.Context, skills []string) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: AddSkills - addSkills"))
+}
+
+// RemoveSkill is the resolver for the removeSkill field.
+func (r *mutationResolver) RemoveSkill(ctx context.Context, skill string) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: RemoveSkill - removeSkill"))
+}
+
+// SetAvailability is the resolver for the setAvailability field.
+func (r *mutationResolver) SetAvailability(ctx context.Context, input model.AvailabilityInput) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: SetAvailability - setAvailability"))
+}
+
+// CreateNonprofit is the resolver for the createNonprofit field.
+func (r *mutationResolver) CreateNonprofit(ctx context.Context, input model.NonprofitInput) (*model.Nonprofit, error) {
+	panic(fmt.Errorf("not implemented: CreateNonprofit - createNonprofit"))
+}
+
+// UpdateNonprofit is the resolver for the updateNonprofit field.
+func (r *mutationResolver) UpdateNonprofit(ctx context.Context, id string, input model.NonprofitInput) (*model.Nonprofit, error) {
+	panic(fmt.Errorf("not implemented: UpdateNonprofit - updateNonprofit"))
+}
+
+// VerifyNonprofit is the resolver for the verifyNonprofit field.
+func (r *mutationResolver) VerifyNonprofit(ctx context.Context, id string) (*model.Nonprofit, error) {
+	panic(fmt.Errorf("not implemented: VerifyNonprofit - verifyNonprofit"))
+}
+
+// CreateProject is the resolver for the createProject field.
+func (r *mutationResolver) CreateProject(ctx context.Context, input model.ProjectInput) (*model.Project, error) {
+	panic(fmt.Errorf("not implemented: CreateProject - createProject"))
+}
+
+// UpdateProject is the resolver for the updateProject field.
+func (r *mutationResolver) UpdateProject(ctx context.Context, id string, input model.ProjectInput) (*model.Project, error) {
+	panic(fmt.Errorf("not implemented: UpdateProject - updateProject"))
+}
+
+// ChangeProjectStatus is the resolver for the changeProjectStatus field.
+func (r *mutationResolver) ChangeProjectStatus(ctx context.Context, id string, status model.ProjectStatus) (*model.Project, error) {
+	panic(fmt.Errorf("not implemented: ChangeProjectStatus - changeProjectStatus"))
+}
+
+// ApplyToProject is the resolver for the applyToProject field.
+func (r *mutationResolver) ApplyToProject(ctx context.Context, projectID string, message *string) (*model.Application, error) {
+	panic(fmt.Errorf("not implemented: ApplyToProject - applyToProject"))
+}
+
+// AcceptApplication is the resolver for the acceptApplication field.
+func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationID string) (*model.Application, error) {
+	panic(fmt.Errorf("not implemented: AcceptApplication - acceptApplication"))
+}
+
+// RejectApplication is the resolver for the rejectApplication field.
+func (r *mutationResolver) RejectApplication(ctx context.Context, applicationID string) (*model.Application, error) {
+	panic(fmt.Errorf("not implemented: RejectApplication - rejectApplication"))
+}
+
+// StartVolunteering is the resolver for the startVolunteering field.
+func (r *mutationResolver) StartVolunteering(ctx context.Context, projectID string) (*model.Engagement, error) {
+	panic(fmt.Errorf("not implemented: StartVolunteering - startVolunteering"))
+}
+
+// CompleteEngagement is the resolver for the completeEngagement field.
+func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementID string, feedback *string) (*model.Engagement, error) {
+	panic(fmt.Errorf("not implemented: CompleteEngagement - completeEngagement"))
+}
+
+// LogHours is the resolver for the logHours field.
+func (r *mutationResolver) LogHours(ctx context.Context, engagementID string, hours float64, date string, description *string) (*model.HoursLogged, error) {
+	panic(fmt.Errorf("not implemented: LogHours - logHours"))
+}
+
+// ID is the resolver for the id field.
+func (r *nonprofitResolver) ID(ctx context.Context, obj *model.Nonprofit) (string, error) {
+	// obj is the *model.Nonprofit fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// Logo is the resolver for the logo field.
+func (r *nonprofitResolver) Logo(ctx context.Context, obj *model.Nonprofit) (*string, error) {
+	panic(fmt.Errorf("not implemented: Logo - logo"))
+}
+
+// CreatedAt is the resolver for the createdAt field.
+func (r *nonprofitResolver) CreatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
+	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+}
+
+// UpdatedAt is the resolver for the updatedAt field.
+func (r *nonprofitResolver) UpdatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
+	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+}
+
+// ID is the resolver for the id field.
+func (r *projectResolver) ID(ctx context.Context, obj *model.Project) (string, error) {
+	// obj is the *model.Project fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// StartDate is the resolver for the startDate field.
+func (r *projectResolver) StartDate(ctx context.Context, obj *model.Project) (*string, error) {
+	panic(fmt.Errorf("not implemented: StartDate - startDate"))
+}
+
+// EndDate is the resolver for the endDate field.
+func (r *projectResolver) EndDate(ctx context.Context, obj *model.Project) (*string, error) {
+	panic(fmt.Errorf("not implemented: EndDate - endDate"))
+}
+
+// CreatedAt is the resolver for the createdAt field.
+func (r *projectResolver) CreatedAt(ctx context.Context, obj *model.Project) (string, error) {
+	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+}
+
+// UpdatedAt is the resolver for the updatedAt field.
+func (r *projectResolver) UpdatedAt(ctx context.Context, obj *model.Project) (string, error) {
+	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+}
+
+// Nonprofit is the resolver for the nonprofit field.
+func (r *projectResolver) Nonprofit(ctx context.Context, obj *model.Project) (*model.Nonprofit, error) {
+	// obj is the *model.Project fetched by the parent resolver.
+	// We need to fetch the associated Nonprofit using the NonprofitID.
+
+	// Option 1: If GORM preloaded it (efficient if fetching many projects)
+	// If the parent resolver did something like r.DB.Preload("Nonprofit").Find(&projects),
+	// then obj.Nonprofit might already be populated. However, relying on this implicitly
+	// can be fragile. Let's fetch explicitly for clarity.
+
+	// Option 2: Fetch explicitly (guaranteed to work)
+	var nonprofit model.Nonprofit
+	// obj.NonprofitID holds the foreign key
+	if err := r.DB.First(&nonprofit, obj.NonprofitID).Error; err != nil {
+		// Handle errors, e.g., nonprofit not found
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("nonprofit with ID %d not found for project %d", obj.NonprofitID, obj.ID)
+		}
+		// Log other errors
+		return nil, fmt.Errorf("failed to fetch nonprofit for project: %w", err)
+	}
+	return &nonprofit, nil // Return pointer
+}
+
+// Me is the resolver for the me field.
+func (r *queryResolver) Me(ctx context.Context) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: Me - me"))
+}
+
+// User is the resolver for the user field.
+func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error) {
+	panic(fmt.Errorf("not implemented: User - user"))
+}
+
+// Users is the resolver for the users field.
+func (r *queryResolver) Users(ctx context.Context, skills []string, availability *model.AvailabilityFilter, role *model.UserRole) ([]*model.User, error) {
+	panic(fmt.Errorf("not implemented: Users - users"))
+}
+
+// Nonprofit is the resolver for the nonprofit field.
+func (r *queryResolver) Nonprofit(ctx context.Context, id string) (*model.Nonprofit, error) {
+	panic(fmt.Errorf("not implemented: Nonprofit - nonprofit"))
+}
+
+// Nonprofits is the resolver for the nonprofits field.
+func (r *queryResolver) Nonprofits(ctx context.Context, causes []string, size *model.NonprofitSize, verifiedOnly *bool, search *string) ([]*model.Nonprofit, error) {
+	panic(fmt.Errorf("not implemented: Nonprofits - nonprofits"))
+}
+
+// Project is the resolver for the project field.
+func (r *queryResolver) Project(ctx context.Context, id string) (*model.Project, error) {
+	panic(fmt.Errorf("not implemented: Project - project"))
+}
+
+// Projects is the resolver for the projects field.
+func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitID *string) ([]*model.Project, error) {
+	panic(fmt.Errorf("not implemented: Projects - projects"))
+}
+
+// RecommendedProjects is the resolver for the recommendedProjects field.
+func (r *queryResolver) RecommendedProjects(ctx context.Context, limit *int32) ([]*model.Project, error) {
+	panic(fmt.Errorf("not implemented: RecommendedProjects - recommendedProjects"))
+}
+
+// RecommendedVolunteers is the resolver for the recommendedVolunteers field.
+func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectID string, limit *int32) ([]*model.User, error) {
+	panic(fmt.Errorf("not implemented: RecommendedVolunteers - recommendedVolunteers"))
+}
+
+// Skills is the resolver for the skills field.
+func (r *queryResolver) Skills(ctx context.Context) ([]*model.Skill, error) {
+	var skills []*model.Skill // Use slice of pointers as gqlgen expects
+
+	// Access the DB from the receiver 'r' (which points to the main Resolver)
+	if err := r.DB.Find(&skills).Error; err != nil {
+		// Log the error appropriately (using your logger is good practice)
+		// logger.Error().Err(err).Msg("Failed to fetch skills")
+		return nil, fmt.Errorf("failed to fetch skills: %w", err)
+	}
+
+	return skills, nil
+}
+
+// Causes is the resolver for the causes field.
+func (r *queryResolver) Causes(ctx context.Context) ([]*model.Cause, error) {
+	panic(fmt.Errorf("not implemented: Causes - causes"))
+}
+
+// ID is the resolver for the id field.
+func (r *skillResolver) ID(ctx context.Context, obj *model.Skill) (string, error) {
+	// obj is the *model.Skill fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// ProjectUpdated is the resolver for the projectUpdated field.
+func (r *subscriptionResolver) ProjectUpdated(ctx context.Context, projectID string) (<-chan *model.Project, error) {
+	panic(fmt.Errorf("not implemented: ProjectUpdated - projectUpdated"))
+}
+
+// ApplicationReceived is the resolver for the applicationReceived field.
+func (r *subscriptionResolver) ApplicationReceived(ctx context.Context) (<-chan *model.Application, error) {
+	panic(fmt.Errorf("not implemented: ApplicationReceived - applicationReceived"))
+}
+
+// EngagementStarted is the resolver for the engagementStarted field.
+func (r *subscriptionResolver) EngagementStarted(ctx context.Context) (<-chan *model.Engagement, error) {
+	panic(fmt.Errorf("not implemented: EngagementStarted - engagementStarted"))
+}
+
+// ID is the resolver for the id field.
+func (r *userResolver) ID(ctx context.Context, obj *model.User) (string, error) {
+	// obj is the *model.User fetched by the parent resolver
+	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
+}
+
+// Avatar is the resolver for the avatar field.
+func (r *userResolver) Avatar(ctx context.Context, obj *model.User) (*string, error) {
+	panic(fmt.Errorf("not implemented: Avatar - avatar"))
+}
+
+// LinkedIn is the resolver for the linkedIn field.
+func (r *userResolver) LinkedIn(ctx context.Context, obj *model.User) (*string, error) {
+	panic(fmt.Errorf("not implemented: LinkedIn - linkedIn"))
+}
+
+// Portfolio is the resolver for the portfolio field.
+func (r *userResolver) Portfolio(ctx context.Context, obj *model.User) (*string, error) {
+	panic(fmt.Errorf("not implemented: Portfolio - portfolio"))
+}
+
+// CreatedAt is the resolver for the createdAt field.
+func (r *userResolver) CreatedAt(ctx context.Context, obj *model.User) (string, error) {
+	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+}
+
+// UpdatedAt is the resolver for the updatedAt field.
+func (r *userResolver) UpdatedAt(ctx context.Context, obj *model.User) (string, error) {
+	panic(fmt.Errorf("not implemented: UpdatedAt - updatedAt"))
+}
+
+// HoursLogged fetches all hours logged by the user across engagements.
+func (r *userResolver) HoursLogged(ctx context.Context, obj *model.User) ([]*model.HoursLogged, error) {
+	// --- Authorization Check (similar to Applications) ---
+
+	var hours []*model.HoursLogged
+	// Join through engagements to get hours for this user
+	err := r.DB.Model(&model.HoursLogged{}).
+		Joins("JOIN engagements ON engagements.id = hours_loggeds.engagement_id").
+		Where("engagements.volunteer_id = ?", obj.ID).
+		Preload("Engagement"). // Preload engagement for context
+		Find(&hours).Error
+	if err != nil {
+		// log.Printf("Error fetching hours logged for user %d: %v\n", obj.ID, err)
+		return nil, fmt.Errorf("failed to fetch hours logged: %w", err)
+	}
+	return hours, nil
+}
+
+// Application returns ApplicationResolver implementation.
+func (r *Resolver) Application() ApplicationResolver { return &applicationResolver{r} }
+
+// Availability returns AvailabilityResolver implementation.
+func (r *Resolver) Availability() AvailabilityResolver { return &availabilityResolver{r} }
+
+// Cause returns CauseResolver implementation.
+func (r *Resolver) Cause() CauseResolver { return &causeResolver{r} }
+
+// Engagement returns EngagementResolver implementation.
+func (r *Resolver) Engagement() EngagementResolver { return &engagementResolver{r} }
+
+// HoursLogged returns HoursLoggedResolver implementation.
+func (r *Resolver) HoursLogged() HoursLoggedResolver { return &hoursLoggedResolver{r} }
+
+// Mutation returns MutationResolver implementation.
+func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
+
+// Nonprofit returns NonprofitResolver implementation.
+func (r *Resolver) Nonprofit() NonprofitResolver { return &nonprofitResolver{r} }
+
+// Project returns ProjectResolver implementation.
+func (r *Resolver) Project() ProjectResolver { return &projectResolver{r} }
+
+// Query returns QueryResolver implementation.
+func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
+
+// Skill returns SkillResolver implementation.
+func (r *Resolver) Skill() SkillResolver { return &skillResolver{r} }
+
+// Subscription returns SubscriptionResolver implementation.
+func (r *Resolver) Subscription() SubscriptionResolver { return &subscriptionResolver{r} }
+
+// User returns UserResolver implementation.
+func (r *Resolver) User() UserResolver { return &userResolver{r} }
+
+type applicationResolver struct{ *Resolver }
+type availabilityResolver struct{ *Resolver }
+type causeResolver struct{ *Resolver }
+type engagementResolver struct{ *Resolver }
+type hoursLoggedResolver struct{ *Resolver }
+type mutationResolver struct{ *Resolver }
+type nonprofitResolver struct{ *Resolver }
+type projectResolver struct{ *Resolver }
+type queryResolver struct{ *Resolver }
+type skillResolver struct{ *Resolver }
+type subscriptionResolver struct{ *Resolver }
+type userResolver struct{ *Resolver }
+Help me implement these resolvers in schema.resolvers.go file and explain properly role and need of each 
