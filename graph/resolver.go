@@ -21,10 +21,10 @@ type Resolver struct {
 // }
 
 // Application is a stub method to satisfy the ResolverRoot interface.
-func (r *Resolver) Application() string {
-	// Implement the method logic or return a placeholder value
-	return "Application method not implemented"
-}
+// func (r *Resolver) Application() ApplicationResolver {
+// 	// Implement the method logic or return a placeholder value
+// 	return &applicationResolver{r}
+// }
 
 func NewResolver(db *gorm.DB) *Resolver {
 	return &Resolver{

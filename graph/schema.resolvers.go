@@ -8,129 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strconv"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/prkagrawal/cosmos-bk2/auth"
 	"github.com/prkagrawal/cosmos-bk2/graph/model"
+	"github.com/prkagrawal/cosmos-bk2/utils"
 	"gorm.io/gorm"
 )
-
-// --- Helper Functions ---
-
-// idToUint converts a GraphQL ID (string) to a GORM ID (uint).
-func idToUint(idStr string) (uint, error) {
-	if idStr == "" {
-		return 0, errors.New("ID string cannot be empty")
-	}
-	idUint64, err := strconv.ParseUint(idStr, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid ID format '%s': %w", idStr, err)
-	}
-	return uint(idUint64), nil
-}
-
-// formatTime formats a time.Time object into an RFC3339 string.
-// GraphQL DateTime scalars are typically represented as ISO 8601 strings.
-func formatTime(t time.Time) string {
-	// Check if the time is the zero value for time.Time.
-	// GORM's default for `time.Time` not explicitly set can be "0001-01-01T00:00:00Z".
-	// Depending on schema (nullable or not), you might return "" or an error.
-	// For non-nullable DateTime, an actual date string is expected.
-	if t.IsZero() || t.Unix() < 0 { // Check for zero time or very old default time
-		// This case needs careful handling based on whether the GraphQL field is nullable
-		// and what a "zero" date means in your application.
-		// If the field is non-nullable in GraphQL, returning "" might lead to GQL errors.
-		// For now, let's assume zero time means it's not set, and if GraphQL expects a string,
-		// we should ideally not reach here for non-nullable fields with zero times.
-		// Or, if it's a valid "zero" representation, format it.
-		// Let's be strict: if it's a real date, format it. If zero, and GQL field is string, it's tricky.
-		// Assuming GORM populates these from DB, they should be valid or zero.
-		// Let's return empty string for zero time, and let GQL validation catch if it's an issue for non-nullable.
-		return ""
-	}
-	return t.Format(time.RFC3339)
-}
-
-// formatNullableTime formats a *time.Time object into a *string (RFC3339).
-// If the time.Time pointer is nil or the time is zero, it returns nil.
-func formatNullableTime(t *time.Time) *string {
-	if t == nil || t.IsZero() || t.Unix() < 0 {
-		return nil
-	}
-	s := t.Format(time.RFC3339)
-	return &s
-}
-
-// parseDateTimeString converts an RFC3339 string to time.Time.
-func parseDateTimeString(dateTimeStr string) (time.Time, error) {
-	if dateTimeStr == "" {
-		return time.Time{}, errors.New("date string cannot be empty")
-	}
-	t, err := time.Parse(time.RFC3339, dateTimeStr)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid date format: %w", err)
-	}
-	return t, nil
-}
-
-// parseNullableDateTimeString converts an *string (RFC3339) to *time.Time.
-func parseNullableDateTimeString(dateTimeStr *string) (*time.Time, error) {
-	if dateTimeStr == nil || *dateTimeStr == "" {
-		return nil, nil
-	}
-	t, err := time.Parse(time.RFC3339, *dateTimeStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid date format: %w", err)
-	}
-	return &t, nil
-}
-
-// saveUpload saves an uploaded file and returns its URL or path.
-// This is a basic example saving to a local "uploads" directory.
-// For production, use a cloud storage service like S3.
-func saveUpload(upload *model.Upload, subDir string) (string, error) {
-	if upload == nil {
-		return "", nil // No upload provided
-	}
-
-	// Create a unique filename to prevent overwrites
-	ext := filepath.Ext(upload.Filename)
-	uniqueFilename := uuid.New().String() + ext
-
-	// Define the path to save. Ensure 'uploads' directory and 'subDir' exist.
-	uploadDirPath := filepath.Join("uploads", subDir)
-	if err := os.MkdirAll(uploadDirPath, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-	filePath := filepath.Join(uploadDirPath, uniqueFilename)
-
-	// Create the destination file
-	dst, err := os.Create(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer dst.Close()
-
-	// Copy the uploaded file content to the destination file
-	if _, err := io.Copy(dst, upload.File); err != nil {
-		return "", fmt.Errorf("failed to copy uploaded file: %w", err)
-	}
-
-	// Return a URL or path. For local, it might be a relative path.
-	// For a web server, you'd return a URL like "/uploads/avatars/filename.jpg"
-	// This path needs to be configurable and accessible by your frontend/clients.
-	// Example: return "/" + filePath, // if "uploads" is served statically
-	return filePath, nil // Returning raw filepath for simplicity here
-}
-
-/****************************************************
-**********************RESOLVERS***********************
-*****************************************************/
 
 // ID is the resolver for the id field.
 func (r *applicationResolver) ID(ctx context.Context, obj *model.Application) (string, error) {
@@ -140,12 +24,12 @@ func (r *applicationResolver) ID(ctx context.Context, obj *model.Application) (s
 
 // AppliedAt is the resolver for the appliedAt field.
 func (r *applicationResolver) AppliedAt(ctx context.Context, obj *model.Application) (string, error) {
-	return formatTime(obj.AppliedAt), nil
+	return utils.FormatTime(obj.AppliedAt), nil
 }
 
 // DecidedAt is the resolver for the decidedAt field.
 func (r *applicationResolver) DecidedAt(ctx context.Context, obj *model.Application) (*string, error) {
-	return formatNullableTime(obj.DecidedAt), nil
+	return utils.FormatNullableTime(obj.DecidedAt), nil
 }
 
 // HoursPerWeek converts int to int32 for GraphQL Int.
@@ -174,17 +58,17 @@ func (r *engagementResolver) ID(ctx context.Context, obj *model.Engagement) (str
 
 // StartDate is the resolver for the startDate field.
 func (r *engagementResolver) StartDate(ctx context.Context, obj *model.Engagement) (string, error) {
-	return formatTime(obj.StartDate), nil
+	return utils.FormatTime(obj.StartDate), nil
 }
 
 // EndDate is the resolver for the endDate field.
 func (r *engagementResolver) EndDate(ctx context.Context, obj *model.Engagement) (*string, error) {
-	return formatNullableTime(obj.EndDate), nil
+	return utils.FormatNullableTime(obj.EndDate), nil
 }
 
 // FeedbackSubmittedAt is the resolver for the feedbackSubmittedAt field.
 func (r *engagementResolver) FeedbackSubmittedAt(ctx context.Context, obj *model.Engagement) (*string, error) {
-	return formatNullableTime(obj.FeedbackSubmittedAt), nil
+	return utils.FormatNullableTime(obj.FeedbackSubmittedAt), nil
 }
 
 // ID is the resolver for the id field.
@@ -195,12 +79,12 @@ func (r *hoursLoggedResolver) ID(ctx context.Context, obj *model.HoursLogged) (s
 
 // Date is the resolver for the date field.
 func (r *hoursLoggedResolver) Date(ctx context.Context, obj *model.HoursLogged) (string, error) {
-	return formatTime(obj.Date), nil
+	return utils.FormatTime(obj.Date), nil
 }
 
 // ApprovedAt is the resolver for the approvedAt field.
 func (r *hoursLoggedResolver) ApprovedAt(ctx context.Context, obj *model.HoursLogged) (*string, error) {
-	return formatNullableTime(obj.ApprovedAt), nil
+	return utils.FormatNullableTime(obj.ApprovedAt), nil
 }
 
 // Login is the resolver for the login field.
@@ -322,7 +206,7 @@ func (r *mutationResolver) UpdateProfile(ctx context.Context, input model.Profil
 			Filename: input.Avatar.Filename,
 			File:     input.Avatar.File,
 		}
-		avatarURL, err := saveUpload(avatar, "avatars")
+		avatarURL, err := utils.SaveUpload(avatar, "avatars")
 		if err != nil {
 			// Log error: fmt.Printf("Failed to upload avatar: %v\n", err)
 			return nil, fmt.Errorf("failed to save avatar: %w", err)
@@ -387,18 +271,18 @@ func (r *mutationResolver) AddSkills(ctx context.Context, skills []string) (*mod
 }
 
 // RemoveSkill is the resolver for the removeSkill field.
-func (r *mutationResolver) RemoveSkill(ctx context.Context, skillName string) (*model.User, error) {
+func (r *mutationResolver) RemoveSkill(ctx context.Context, skill string) (*model.User, error) {
 	currentUser, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
 	var skillToRemove model.Skill
-	if err := r.DB.Where("name = ?", skillName).First(&skillToRemove).Error; err != nil {
+	if err := r.DB.Where("name = ?", skill).First(&skillToRemove).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("skill '%s' not found", skillName)
+			return nil, fmt.Errorf("skill '%s' not found", skill)
 		}
-		return nil, fmt.Errorf("failed to find skill '%s': %w", skillName, err)
+		return nil, fmt.Errorf("failed to find skill '%s': %w", skill, err)
 	}
 
 	if err := r.DB.Model(currentUser).Association("Skills").Delete(&skillToRemove); err != nil {
@@ -447,7 +331,7 @@ func (r *mutationResolver) CreateNonprofit(ctx context.Context, input model.Nonp
 			Filename: input.Logo.Filename,
 			File:     input.Logo.File,
 		}
-		logoURL, uploadErr = saveUpload(convertedLogo, "nonprofit_logos")
+		logoURL, uploadErr = utils.SaveUpload(convertedLogo, "nonprofit_logos")
 		if uploadErr != nil {
 			return nil, fmt.Errorf("failed to save nonprofit logo: %w", uploadErr)
 		}
@@ -517,7 +401,7 @@ func (r *mutationResolver) UpdateNonprofit(ctx context.Context, id string, input
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	nonprofitID, err := idToUint(id)
+	nonprofitID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +434,7 @@ func (r *mutationResolver) UpdateNonprofit(ctx context.Context, id string, input
 			Filename: input.Logo.Filename,
 			File:     input.Logo.File,
 		}
-		logoURL, uploadErr := saveUpload(convertedLogo, "nonprofit_logos")
+		logoURL, uploadErr := utils.SaveUpload(convertedLogo, "nonprofit_logos")
 		if uploadErr != nil {
 			return nil, fmt.Errorf("failed to save nonprofit logo: %w", uploadErr)
 		}
@@ -592,7 +476,7 @@ func (r *mutationResolver) VerifyNonprofit(ctx context.Context, id string) (*mod
 		return nil, errors.New("unauthorized: only platform admins can verify nonprofits")
 	}
 
-	nonprofitID, err := idToUint(id)
+	nonprofitID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +505,7 @@ func (r *mutationResolver) CreateProject(ctx context.Context, input model.Projec
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	nonprofitID, err := idToUint(input.NonprofitID)
+	nonprofitID, err := utils.IdToUint(input.NonprofitID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid nonprofit ID: %w", err)
 	}
@@ -652,11 +536,11 @@ func (r *mutationResolver) CreateProject(ctx context.Context, input model.Projec
 		return nil, errors.New("unauthorized: you must be an admin of the nonprofit or a platform admin to create projects")
 	}
 
-	startDate, err := parseNullableDateTimeString(input.StartDate)
+	startDate, err := utils.ParseNullableDateTimeString(input.StartDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start date: %w", err)
 	}
-	endDate, err := parseNullableDateTimeString(input.EndDate)
+	endDate, err := utils.ParseNullableDateTimeString(input.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid end date: %w", err)
 	}
@@ -709,7 +593,7 @@ func (r *mutationResolver) UpdateProject(ctx context.Context, id string, input m
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	projectID, err := idToUint(id)
+	projectID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -726,7 +610,7 @@ func (r *mutationResolver) UpdateProject(ctx context.Context, id string, input m
 	// Similar logic to CreateProject authorization
 	// Example: if !isProjectAdmin(currentUser, projectToUpdate) ...
 
-	_, err = idToUint(input.NonprofitID) // Input has NonprofitID, should this be updatable?
+	_, err = utils.IdToUint(input.NonprofitID) // Input has NonprofitID, should this be updatable?
 	if err != nil {
 		return nil, fmt.Errorf("invalid nonprofit ID in input: %w", err)
 	}
@@ -744,11 +628,11 @@ func (r *mutationResolver) UpdateProject(ctx context.Context, id string, input m
 	projectToUpdate.Urgency = input.Urgency
 	// projectToUpdate.NonprofitID = nonprofitID; // If you allow changing this
 
-	startDate, err := parseNullableDateTimeString(input.StartDate)
+	startDate, err := utils.ParseNullableDateTimeString(input.StartDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start date: %w", err)
 	}
-	endDate, err := parseNullableDateTimeString(input.EndDate)
+	endDate, err := utils.ParseNullableDateTimeString(input.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("invalid end date: %w", err)
 	}
@@ -786,7 +670,7 @@ func (r *mutationResolver) ChangeProjectStatus(ctx context.Context, id string, s
 	}
 	// TODO: Add authorization logic (e.g., only project admin or platform admin)
 
-	projectID, err := idToUint(id)
+	projectID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +694,7 @@ func (r *mutationResolver) ChangeProjectStatus(ctx context.Context, id string, s
 }
 
 // ApplyToProject is the resolver for the applyToProject field.
-func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr string, message *string) (*model.Application, error) {
+func (r *mutationResolver) ApplyToProject(ctx context.Context, projectID string, message *string) (*model.Application, error) {
 	currentUser, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
@@ -819,7 +703,7 @@ func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr stri
 		return nil, errors.New("only volunteers can apply to projects")
 	}
 
-	projectID, err := idToUint(projectIDStr)
+	projectUintID, err := utils.IdToUint(projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -828,7 +712,7 @@ func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr stri
 	var project model.Project
 	if err := r.DB.Where("status = ?", model.Active).First(&project, projectID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("active project with ID %s not found or not accepting applications", projectIDStr)
+			return nil, fmt.Errorf("active project with ID %s not found or not accepting applications", projectID)
 		}
 		return nil, fmt.Errorf("failed to fetch project: %w", err)
 	}
@@ -845,7 +729,7 @@ func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr stri
 
 	newApplication := model.Application{
 		VolunteerID: currentUser.ID,
-		ProjectID:   projectID,
+		ProjectID:   projectUintID,
 		Message:     message,
 		Status:      model.Pending,
 		AppliedAt:   time.Now(),
@@ -860,21 +744,21 @@ func (r *mutationResolver) ApplyToProject(ctx context.Context, projectIDStr stri
 }
 
 // AcceptApplication is the resolver for the acceptApplication field.
-func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationIDStr string) (*model.Application, error) {
+func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationID string) (*model.Application, error) {
 	_, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	applicationID, err := idToUint(applicationIDStr)
+	applicationIDStr, err := utils.IdToUint(applicationID)
 	if err != nil {
 		return nil, err
 	}
 
 	var applicationToUpdate model.Application
-	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationID).Error; err != nil {
+	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationIDStr).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("application with ID %s not found", applicationIDStr)
+			return nil, fmt.Errorf("application with ID %s not found", applicationID)
 		}
 		return nil, fmt.Errorf("failed to fetch application: %w", err)
 	}
@@ -903,20 +787,20 @@ func (r *mutationResolver) AcceptApplication(ctx context.Context, applicationIDS
 }
 
 // RejectApplication is the resolver for the rejectApplication field.
-func (r *mutationResolver) RejectApplication(ctx context.Context, applicationIDStr string) (*model.Application, error) {
+func (r *mutationResolver) RejectApplication(ctx context.Context, applicationID string) (*model.Application, error) {
 	// Similar logic to AcceptApplication for auth and fetching
 	_, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	applicationID, err := idToUint(applicationIDStr)
+	applicationIDUsable, err := utils.IdToUint(applicationID)
 	if err != nil {
 		return nil, err
 	}
 
 	var applicationToUpdate model.Application
-	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationID).Error; err != nil {
+	if err := r.DB.Preload("Project").First(&applicationToUpdate, applicationIDUsable).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch application: %w", err)
 	}
 
@@ -938,13 +822,13 @@ func (r *mutationResolver) RejectApplication(ctx context.Context, applicationIDS
 }
 
 // StartVolunteering is the resolver for the startVolunteering field.
-func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr string) (*model.Engagement, error) {
+func (r *mutationResolver) StartVolunteering(ctx context.Context, projectID string) (*model.Engagement, error) {
 	currentUser, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	projectID, err := idToUint(projectIDStr)
+	projectIDUsable, err := utils.IdToUint(projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -955,7 +839,7 @@ func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr s
 
 	var acceptedApplication model.Application
 	err = r.DB.Where("volunteer_id = ? AND project_id = ? AND status = ?",
-		currentUser.ID, projectID, model.Accepted).First(&acceptedApplication).Error
+		currentUser.ID, projectIDUsable, model.Accepted).First(&acceptedApplication).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errors.New("no accepted application found for you on this project, or you are not the volunteer")
@@ -965,7 +849,7 @@ func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr s
 
 	// Check if an engagement already exists for this application/project/volunteer
 	var existingEngagement model.Engagement
-	err = r.DB.Where("volunteer_id = ? AND project_id = ?", currentUser.ID, projectID).First(&existingEngagement).Error
+	err = r.DB.Where("volunteer_id = ? AND project_id = ?", currentUser.ID, projectIDUsable).First(&existingEngagement).Error
 	if err == nil { // Engagement already exists
 		return nil, errors.New("an engagement for this project and volunteer already exists")
 	}
@@ -974,8 +858,8 @@ func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr s
 	}
 
 	newEngagement := model.Engagement{
-		VolunteerID: currentUser.ID, // Or from application.VolunteerID
-		ProjectID:   projectID,      // Or from application.ProjectID
+		VolunteerID: currentUser.ID,  // Or from application.VolunteerID
+		ProjectID:   projectIDUsable, // Or from application.ProjectID
 		StartDate:   time.Now(),
 		Status:      model.EngagementActive,
 	}
@@ -985,26 +869,26 @@ func (r *mutationResolver) StartVolunteering(ctx context.Context, projectIDStr s
 	}
 
 	// Optionally, update project status to IN_PROGRESS if not already
-	r.DB.Model(&model.Project{}).Where("id = ?", projectID).Update("status", model.InProgress)
+	r.DB.Model(&model.Project{}).Where("id = ?", projectIDUsable).Update("status", model.InProgress)
 
 	r.DB.Preload("Volunteer").Preload("Project").First(&newEngagement, newEngagement.ID)
 	return &newEngagement, nil
 }
 
 // CompleteEngagement is the resolver for the completeEngagement field.
-func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementIDStr string, feedback *string) (*model.Engagement, error) {
+func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementID string, feedback *string) (*model.Engagement, error) {
 	currentUser, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	engagementID, err := idToUint(engagementIDStr)
+	engagementIDUsable, err := utils.IdToUint(engagementID)
 	if err != nil {
 		return nil, err
 	}
 
 	var engagementToUpdate model.Engagement
-	if err := r.DB.First(&engagementToUpdate, engagementID).Error; err != nil {
+	if err := r.DB.First(&engagementToUpdate, engagementIDUsable).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch engagement: %w", err)
 	}
 
@@ -1036,13 +920,13 @@ func (r *mutationResolver) CompleteEngagement(ctx context.Context, engagementIDS
 }
 
 // LogHours is the resolver for the logHours field.
-func (r *mutationResolver) LogHours(ctx context.Context, engagementIDStr string, hours float64, dateStr string, description *string) (*model.HoursLogged, error) {
+func (r *mutationResolver) LogHours(ctx context.Context, engagementID string, hours float64, date string, description *string) (*model.HoursLogged, error) {
 	currentUser, err := auth.GetUserFromContext(ctx)
 	if err != nil {
 		return nil, errors.New("unauthenticated: " + err.Error())
 	}
 
-	engagementID, err := idToUint(engagementIDStr)
+	engagementIDUsable, err := utils.IdToUint(engagementID)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,14 +943,14 @@ func (r *mutationResolver) LogHours(ctx context.Context, engagementIDStr string,
 		return nil, errors.New("cannot log hours for an engagement that is not active")
 	}
 
-	date, err := parseDateTimeString(dateStr)
+	dateUsable, err := utils.ParseDateTimeString(date)
 	if err != nil {
 		return nil, fmt.Errorf("invalid date for hours logged: %w", err)
 	}
 
 	newHoursLogged := model.HoursLogged{
-		EngagementID: engagementID,
-		Date:         date,
+		EngagementID: engagementIDUsable,
+		Date:         dateUsable,
 		Hours:        hours,
 		Description:  description,
 		// Approved defaults to null/false depending on DB. Approval is a separate step.
@@ -1079,10 +963,6 @@ func (r *mutationResolver) LogHours(ctx context.Context, engagementIDStr string,
 	r.DB.Preload("Engagement").Preload("ApprovedBy").First(&newHoursLogged, newHoursLogged.ID)
 	return &newHoursLogged, nil
 }
-
-// --------------------------------------
-// --- NonProfit Field Resolvers ---
-// --------------------------------------
 
 // ID is the resolver for the id field.
 func (r *nonprofitResolver) ID(ctx context.Context, obj *model.Nonprofit) (string, error) {
@@ -1103,17 +983,13 @@ func (r *nonprofitResolver) Logo(ctx context.Context, obj *model.Nonprofit) (*st
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *nonprofitResolver) CreatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
-	return formatTime(obj.CreatedAt), nil
+	return utils.FormatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *nonprofitResolver) UpdatedAt(ctx context.Context, obj *model.Nonprofit) (string, error) {
-	return formatTime(obj.UpdatedAt), nil
+	return utils.FormatTime(obj.UpdatedAt), nil
 }
-
-// --------------------------------------
-// --- Project Field Resolvers ---
-// --------------------------------------
 
 // ID is the resolver for the id field.
 func (r *projectResolver) ID(ctx context.Context, obj *model.Project) (string, error) {
@@ -1123,22 +999,22 @@ func (r *projectResolver) ID(ctx context.Context, obj *model.Project) (string, e
 
 // StartDate is the resolver for the startDate field.
 func (r *projectResolver) StartDate(ctx context.Context, obj *model.Project) (*string, error) {
-	return formatNullableTime(obj.StartDate), nil
+	return utils.FormatNullableTime(obj.StartDate), nil
 }
 
 // EndDate is the resolver for the endDate field.
 func (r *projectResolver) EndDate(ctx context.Context, obj *model.Project) (*string, error) {
-	return formatNullableTime(obj.EndDate), nil
+	return utils.FormatNullableTime(obj.EndDate), nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *projectResolver) CreatedAt(ctx context.Context, obj *model.Project) (string, error) {
-	return formatTime(obj.CreatedAt), nil
+	return utils.FormatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *projectResolver) UpdatedAt(ctx context.Context, obj *model.Project) (string, error) {
-	return formatTime(obj.UpdatedAt), nil
+	return utils.FormatTime(obj.UpdatedAt), nil
 }
 
 // Nonprofit is the resolver for the nonprofit field.
@@ -1165,10 +1041,6 @@ func (r *projectResolver) Nonprofit(ctx context.Context, obj *model.Project) (*m
 	return &nonprofit, nil // Return pointer
 }
 
-// ----------------------------
-// --- Query Resolvers ---
-// ----------------------------
-
 // Me is the resolver for the me field.
 func (r *queryResolver) Me(ctx context.Context) (*model.User, error) {
 	user, err := auth.GetUserFromContext(ctx)
@@ -1186,8 +1058,8 @@ func (r *queryResolver) Me(ctx context.Context) (*model.User, error) {
 }
 
 // User is the resolver for the user field.
-func (r *queryResolver) User(ctx context.Context, idStr string) (*model.User, error) {
-	userID, err := idToUint(idStr)
+func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error) {
+	userID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -1256,8 +1128,8 @@ func (r *queryResolver) Users(ctx context.Context, skills []string, availability
 }
 
 // Nonprofit is the resolver for the nonprofit field.
-func (r *queryResolver) Nonprofit(ctx context.Context, idStr string) (*model.Nonprofit, error) {
-	nonprofitID, err := idToUint(idStr)
+func (r *queryResolver) Nonprofit(ctx context.Context, id string) (*model.Nonprofit, error) {
+	nonprofitID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -1299,8 +1171,8 @@ func (r *queryResolver) Nonprofits(ctx context.Context, causes []string, size *m
 }
 
 // Project is the resolver for the project field.
-func (r *queryResolver) Project(ctx context.Context, idStr string) (*model.Project, error) {
-	projectID, err := idToUint(idStr)
+func (r *queryResolver) Project(ctx context.Context, id string) (*model.Project, error) {
+	projectID, err := utils.IdToUint(id)
 	if err != nil {
 		return nil, err
 	}
@@ -1315,7 +1187,7 @@ func (r *queryResolver) Project(ctx context.Context, idStr string) (*model.Proje
 }
 
 // Projects is the resolver for the projects field.
-func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitIDStr *string) ([]*model.Project, error) {
+func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitID *string) ([]*model.Project, error) {
 	query := r.DB.Model(&model.Project{}).Preload("SkillsNeeded").Preload("Nonprofit")
 
 	if status != nil {
@@ -1332,8 +1204,8 @@ func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatu
 	if urgency != nil {
 		query = query.Where("urgency = ?", *urgency)
 	}
-	if nonprofitIDStr != nil && *nonprofitIDStr != "" {
-		nonprofitID, err := idToUint(*nonprofitIDStr)
+	if nonprofitID != nil && *nonprofitID != "" {
+		nonprofitID, err := utils.IdToUint(*nonprofitID)
 		if err != nil {
 			return nil, fmt.Errorf("invalid nonprofit ID for filtering: %w", err)
 		}
@@ -1370,16 +1242,16 @@ func (r *queryResolver) RecommendedProjects(ctx context.Context, limit *int32) (
 }
 
 // RecommendedVolunteers is the resolver for the recommendedVolunteers field.
-func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectIDStr string, limit *int32) ([]*model.User, error) {
+func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectID string, limit *int32) ([]*model.User, error) {
 	// Basic recommendation: volunteers whose skills match project's skillsNeeded.
 	// More advanced: availability, causes, past project types.
-	projectID, err := idToUint(projectIDStr)
+	projectIDUsable, err := utils.IdToUint(projectID)
 	if err != nil {
 		return nil, err
 	}
 
 	var project model.Project
-	if err := r.DB.Preload("SkillsNeeded").First(&project, projectID).Error; err != nil {
+	if err := r.DB.Preload("SkillsNeeded").First(&project, projectIDUsable).Error; err != nil {
 		return nil, fmt.Errorf("project not found for recommendations: %w", err)
 	}
 
@@ -1438,27 +1310,14 @@ func (r *queryResolver) Causes(ctx context.Context) ([]*model.Cause, error) {
 	return causes, nil
 }
 
-// ------------------------------
-// --- Skill Field Resolver ---
-// ------------------------------
-
 // ID is the resolver for the id field.
 func (r *skillResolver) ID(ctx context.Context, obj *model.Skill) (string, error) {
 	// obj is the *model.Skill fetched by the parent resolver
 	return fmt.Sprintf("%d", obj.ID), nil // Convert uint to string
 }
 
-// ------------------------------
-// --- Subscription Resolvers ---
-// ------------------------------
-
-// ------------------- TODO ------------------
-// Note: Proper subscription implementation requires a PubSub system (e.g., Redis, NATS, or in-memory for simple cases)
-// and integration with gqlgen's subscription capabilities.
-// The following are placeholders.
-
 // ProjectUpdated is the resolver for the projectUpdated field.
-func (r *subscriptionResolver) ProjectUpdated(ctx context.Context, projectIDStr string) (<-chan *model.Project, error) {
+func (r *subscriptionResolver) ProjectUpdated(ctx context.Context, projectID string) (<-chan *model.Project, error) {
 	// 1. Validate projectIDStr
 	// 2. Create a channel for this specific subscription.
 	// 3. In your mutation resolvers (e.g., UpdateProject, ChangeProjectStatus),
@@ -1493,10 +1352,6 @@ func (r *subscriptionResolver) EngagementStarted(ctx context.Context) (<-chan *m
 	panic(fmt.Errorf("not implemented: EngagementStarted - requires PubSub system"))
 }
 
-// -----------------------------------
-// --- User Field Resolvers ---
-// -----------------------------------
-
 // ID is the resolver for the id field.
 func (r *userResolver) ID(ctx context.Context, obj *model.User) (string, error) {
 	// obj is the *model.User fetched by the parent resolver
@@ -1530,12 +1385,12 @@ func (r *userResolver) Portfolio(ctx context.Context, obj *model.User) (*string,
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *userResolver) CreatedAt(ctx context.Context, obj *model.User) (string, error) {
-	return formatTime(obj.CreatedAt), nil
+	return utils.FormatTime(obj.CreatedAt), nil
 }
 
 // UpdatedAt is the resolver for the updatedAt field.
 func (r *userResolver) UpdatedAt(ctx context.Context, obj *model.User) (string, error) {
-	return formatTime(obj.UpdatedAt), nil
+	return utils.FormatTime(obj.UpdatedAt), nil
 }
 
 // HoursLogged fetches all hours logged by the user across engagements.
@@ -1562,26 +1417,8 @@ func (r *userResolver) HoursLogged(ctx context.Context, obj *model.User) ([]*mod
 	return hours, nil
 }
 
-// Applications fetches applications made by this user.
-// This resolver was missing from your initial schema.resolvers.go but is defined in schema.graphqls User type.
-// Gqlgen would generate a panic for it if not implemented.
-func (r *userResolver) Applications(ctx context.Context, obj *model.User) ([]*model.Application, error) {
-	// Authorization: Generally, a user can see their own applications.
-	// If `obj` is not the currently authenticated user, consider if this data should be public.
-	// For simplicity, assuming if we have the user object `obj`, we can show their applications.
-	// The `Me` query would be the typical way a user sees their own.
-
-	var applications []*model.Application
-	// Using GORM's association feature if properly defined, or a direct query:
-	if err := r.DB.Where("volunteer_id = ?", obj.ID).
-		Preload("Project"). // Preload related project for context
-		Order("applied_at DESC").
-		Find(&applications).Error; err != nil {
-		fmt.Printf("Error fetching applications for user %d: %v\n", obj.ID, err) // Replace with logger
-		return nil, fmt.Errorf("failed to fetch applications: %w", err)
-	}
-	return applications, nil
-}
+// Application returns ApplicationResolver implementation.
+func (r *Resolver) Application() ApplicationResolver { return &applicationResolver{r} }
 
 // Availability returns AvailabilityResolver implementation.
 func (r *Resolver) Availability() AvailabilityResolver { return &availabilityResolver{r} }
@@ -1589,21 +1426,8 @@ func (r *Resolver) Availability() AvailabilityResolver { return &availabilityRes
 // Cause returns CauseResolver implementation.
 func (r *Resolver) Cause() CauseResolver { return &causeResolver{r} }
 
-// Engagements fetches engagements for this user.
-// This resolver was missing from your initial schema.resolvers.go but is defined in schema.graphqls User type.
-func (r *userResolver) Engagements(ctx context.Context, obj *model.User) ([]*model.Engagement, error) {
-	// Similar authorization considerations as Applications resolver.
-	var engagements []*model.Engagement
-	if err := r.DB.Where("volunteer_id = ?", obj.ID).
-		Preload("Project").     // Preload related project
-		Preload("HoursLogged"). // Preload hours logged for this engagement
-		Order("start_date DESC").
-		Find(&engagements).Error; err != nil {
-		fmt.Printf("Error fetching engagements for user %d: %v\n", obj.ID, err) // Replace with logger
-		return nil, fmt.Errorf("failed to fetch engagements: %w", err)
-	}
-	return engagements, nil
-}
+// Engagement returns EngagementResolver implementation.
+func (r *Resolver) Engagement() EngagementResolver { return &engagementResolver{r} }
 
 // HoursLogged returns HoursLoggedResolver implementation.
 func (r *Resolver) HoursLogged() HoursLoggedResolver { return &hoursLoggedResolver{r} }
