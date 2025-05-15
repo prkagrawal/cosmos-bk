@@ -54,6 +54,7 @@ func main() {
 	router.Use(zerologLogger(&logger))
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.Timeout(60 * time.Second))
+	router.Use(auth.AuthMiddleware())
 
 	// Initialize auth service
 	authSvc := auth.NewAuthService(database.DB)
