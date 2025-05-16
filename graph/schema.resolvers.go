@@ -1066,7 +1066,7 @@ func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error
 
 	var user model.User
 	// Preload common associations
-	if err := r.DB.Preload("Skills").Preload("Causes").Preload("Availability").First(&user, userID).Error; err != nil {
+	if err := r.DB.Preload("Skills").Preload("Causes").First(&user, userID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil // GraphQL convention: return null if not found, no error in errors array unless it's unexpected
 		}
@@ -1077,7 +1077,7 @@ func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error
 
 // Users is the resolver for the users field.
 func (r *queryResolver) Users(ctx context.Context, skills []string, availability *model.AvailabilityFilter, role *model.UserRole) ([]*model.User, error) {
-	query := r.DB.Model(&model.User{}).Preload("Skills").Preload("Causes").Preload("Availability")
+	query := r.DB.Model(&model.User{}).Preload("Skills").Preload("Causes")
 
 	if role != nil {
 		query = query.Where("role = ?", *role)
@@ -1177,7 +1177,7 @@ func (r *queryResolver) Project(ctx context.Context, id string) (*model.Project,
 		return nil, err
 	}
 	var project model.Project
-	if err := r.DB.Preload("SkillsNeeded").Preload("Nonprofit").Preload("Applications").Preload("Engagements").First(&project, projectID).Error; err != nil {
+	if err := r.DB.Preload("SkillsNeeded").Preload("Applications").Preload("Engagements").First(&project, projectID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil // Not found
 		}
@@ -1188,7 +1188,7 @@ func (r *queryResolver) Project(ctx context.Context, id string) (*model.Project,
 
 // Projects is the resolver for the projects field.
 func (r *queryResolver) Projects(ctx context.Context, status *model.ProjectStatus, skillsNeeded []string, timeCommitment *model.TimeCommitment, urgency *model.UrgencyLevel, nonprofitID *string) ([]*model.Project, error) {
-	query := r.DB.Model(&model.Project{}).Preload("SkillsNeeded").Preload("Nonprofit")
+	query := r.DB.Model(&model.Project{}).Preload("SkillsNeeded")
 
 	if status != nil {
 		query = query.Where("status = ?", *status)
@@ -1272,7 +1272,7 @@ func (r *queryResolver) RecommendedVolunteers(ctx context.Context, projectID str
 		Group("users.id").
 		// Order by number of matching skills (more complex) or just find users with any match.
 		// For now, any match is fine.
-		Preload("Skills").Preload("Causes").Preload("Availability")
+		Preload("Skills").Preload("Causes")
 
 	l := 5 // Default limit
 	if limit != nil && *limit > 0 {
